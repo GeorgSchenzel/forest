@@ -65,6 +65,7 @@ A target is `<name>:<branch>`, where `<name>` is a project or a forest: `backend
 |---|---|
 | `forest init <name> [--branch <b>]` | Start a project with no remote: `git init --bare` into `<root>/<name>/.bare` (default branch `--branch`, else git's `init.defaultBranch`) and add the default-branch worktree on the unborn branch (`worktree add --orphan`). |
 | `forest clone <url> [name]` | Not `git clone --bare` (§5, Remotes). Runs `git init --bare`, `remote add origin <url>`, `fetch`, `remote set-head origin --auto`, points the bare repo's `HEAD` at the default branch (otherwise it keeps `git init`'s default, which may not exist), then adds the default-branch worktree tracking `origin/<default>`. `<url>` can be a local path, e.g. an existing normal clone. |
+| `forest migrate <path> [name]` | Move an existing repo into the layout as `<root>/<name>` (name defaults to the dir name without `.git`), see §5. Re-running on a project that is already in the layout does nothing. |
 | `forest define <forest> [project...] [--add <p>...] [--remove <p>...]` | Create a forest from existing projects, or change an existing forest's project list with `--add` / `--remove`. Removing a project keeps its worktrees in existing workforests. |
 | `forest new <target> [--from <ref>]` | **Project:** create a worktree. Branch resolution: local branch, else remote branch (tracking set up), else a new branch from `--from` or the default branch. **Forest:** the same for every project of the forest, into `<root>/_forests/<forest>/<branch-dir>/<project>`. `--from` is used where the ref exists, else that project's default branch. Idempotent: what exists is kept and its path printed, so re-running fills the gaps (failed projects, projects added to the forest since). On partial failure, what was created stays and the exit code is 1. |
 | `forest ls [name]` | Projects, forests, worktrees and workforests with branch, dir, dirty / ahead / behind / no-upstream. A project's listing includes its worktrees inside workforests. |
@@ -95,6 +96,13 @@ Exit codes: 0 ok, 1 error, 2 refused by a safety check (so scripts can tell them
   `--force` overrides both.
 - **`--delete-branch`:** also deletes the local branch, but only if dropping it is safe: every commit is on a remote-tracking ref or on the local default branch, or its upstream is gone (deleted on the remote after a merge, the normal squash-merge flow). Otherwise it refuses, unless `--force`.
 - **Workforest `rm`:** checks every project first, and any refusal refuses the whole `rm`. Then it removes every project worktree and the workforest dir. Entries in the workforest dir that aren't worktrees refuse the `rm`; with `--force`, the worktrees are removed but those entries are never deleted, so the dir stays and the exit code is 1.
+
+- **`migrate`:** accepts a normal clone (`.git` dir + working tree), a bare repo (`foo.git`, with or without worktrees made inside it), or a nearly laid-out project (`.bare` present, worktrees in the wrong dirs, a `.git` file pointing at `.bare`). A repo outside the root is moved into it first (`rename`, so same filesystem only). Then:
+  - The git dir becomes `<root>/<name>/.bare` (`core.bare = true`).
+  - A normal clone's working tree is **moved**, not checked out again, to `<root>/<name>/<branch-dir>` for the checked-out branch, and keeps its index, so staged, unstaged, untracked and ignored files all survive.
+  - Every other worktree outside `_forests` is moved to its branch dir (`git worktree move`); ones that can't be (detached, target exists, locked) are kept and reported, exit code 1. All links are repaired (`git worktree repair`), relative when supported.
+  - With no worktree left, the default-branch worktree is added, as `clone` would.
+  - It refuses (exit 2) a main worktree with a detached HEAD or an operation in progress (merge, rebase, cherry-pick, revert, bisect), and fails on submodules, on an unborn branch, and on a linked worktree (migrate the repo it belongs to instead).
 
 ## 6. JSON contract (sketch)
 

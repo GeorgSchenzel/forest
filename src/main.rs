@@ -39,6 +39,13 @@ enum Command {
     },
     /// Set up a project from a remote (or local) repository
     Clone { url: String, name: Option<String> },
+    /// Move an existing repo (normal clone, bare repo, or nearly-laid-out project) into the layout
+    Migrate {
+        /// The repo's directory
+        path: PathBuf,
+        /// Project name (default: the directory's name, without `.git`)
+        name: Option<String>,
+    },
     /// Create a forest, or change its project list
     Define {
         /// Forest name
@@ -107,6 +114,7 @@ fn run(cli: Cli) -> Result<Output> {
     match cli.command {
         Command::Init { name, branch } => cmd::setup::init(&layout, &name, branch.as_deref()),
         Command::Clone { url, name } => cmd::setup::clone(&layout, &url, name.as_deref()),
+        Command::Migrate { path, name } => cmd::migrate::migrate(&layout, &path, name.as_deref()),
         Command::Define {
             name,
             projects,

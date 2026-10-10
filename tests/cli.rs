@@ -628,3 +628,182 @@ fn prune_reports_workforest_without_worktrees() {
     let j = e.forest(&["prune", "--json"]).json();
     assert_eq!(j["orphans"][0], leftover.to_str().unwrap());
 }
+
+#[test]
+fn migrate_normal_clone_keeps_the_working_tree() {
+    let e = Env::new();
+    let up = e.upstream("svc");
+    let dir = e.root.join("svc");
+    e.git(
+        &e.base,
+        &["clone", "-q", up.to_str().unwrap(), dir.to_str().unwrap()],
+    );
+    e.git(&dir, &["checkout", "-q", "-b", "master"]);
+    let linked = e.base.join("elsewhere");
+    e.git(
+        &dir,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat/x",
+            linked.to_str().unwrap(),
+        ],
+    );
+    fs::write(dir.join(".gitignore"), "build/\n").unwrap();
+    fs::create_dir(dir.join("build")).unwrap();
+    fs::write(dir.join("build/out"), "x").unwrap();
+    fs::write(dir.join("staged"), "s").unwrap();
+    e.git(&dir, &["add", "staged"]);
+    // A top-level dir named like the branch dir must not get in the way.
+    fs::create_dir(dir.join("master")).unwrap();
+    fs::write(dir.join("master/file"), "m").unwrap();
+
+    let r = e.forest(&["migrate", dir.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.json()["path"], dir.to_str().unwrap());
+
+    let wt = dir.join("master");
+    assert!(dir.join(".bare").is_dir());
+    assert!(!dir.join(".git").exists());
+    assert_eq!(fs::read_to_string(wt.join("build/out")).unwrap(), "x");
+    assert_eq!(fs::read_to_string(wt.join("master/file")).unwrap(), "m");
+    assert_eq!(
+        e.git(&wt, &["status", "--porcelain"]),
+        "A  staged\n?? .gitignore\n?? master/"
+    );
+    assert_eq!(e.git(&wt, &["branch", "--show-current"]), "master");
+    // The linked worktree moved into its branch dir.
+    let feat = dir.join("feat-x");
+    assert!(!linked.exists());
+    assert_eq!(e.git(&feat, &["branch", "--show-current"]), "feat/x");
+
+    let ls = e.forest(&["ls", "svc", "--json"]).json();
+    let mut paths: Vec<&str> = ls["worktrees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["dir"].as_str().unwrap())
+        .collect();
+    paths.sort();
+    assert_eq!(paths, ["feat-x", "master"]);
+    // origin/HEAD came with the clone, so main stays the default.
+    assert_eq!(
+        e.git(
+            &dir.join(".bare"),
+            &["symbolic-ref", "refs/remotes/origin/HEAD"]
+        ),
+        "refs/remotes/origin/main"
+    );
+
+    // Running it again changes nothing.
+    let out = e.ok(&["migrate", dir.to_str().unwrap()]);
+    assert!(out.contains("already in the layout"), "{out}");
+}
+
+#[test]
+fn migrate_moves_a_repo_into_the_root() {
+    let e = Env::new();
+    let src = e.upstream("tool");
+    fs::write(src.join("untracked"), "u").unwrap();
+    let out = e.ok(&["migrate", src.to_str().unwrap(), "app"]);
+    assert!(out.ends_with(e.root.join("app").to_str().unwrap()), "{out}");
+    assert!(!src.exists());
+    let wt = e.root.join("app/main");
+    assert_eq!(fs::read_to_string(wt.join("untracked")).unwrap(), "u");
+    assert_eq!(e.git(&wt, &["log", "--format=%s"]), "first");
+}
+
+#[test]
+fn migrate_bare_repo_with_worktree_inside() {
+    let e = Env::new();
+    let up = e.upstream("lib");
+    let dir = e.root.join("lib.git");
+    e.git(
+        &e.base,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            up.to_str().unwrap(),
+            dir.to_str().unwrap(),
+        ],
+    );
+    e.git(&dir, &["worktree", "add", "-q", "wt", "main"]);
+    fs::write(dir.join("wt/dirty"), "d").unwrap();
+
+    e.ok(&["migrate", dir.to_str().unwrap()]);
+    let lib = e.root.join("lib");
+    assert!(!dir.exists());
+    assert!(lib.join(".bare/HEAD").is_file());
+    assert!(!lib.join("HEAD").exists());
+    assert_eq!(fs::read_to_string(lib.join("main/dirty")).unwrap(), "d");
+    assert!(!lib.join("wt").exists());
+}
+
+#[test]
+fn migrate_bare_repo_without_worktrees_adds_the_default() {
+    let e = Env::new();
+    let up = e.upstream("lib");
+    let dir = e.root.join("lib");
+    e.git(
+        &e.base,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            up.to_str().unwrap(),
+            dir.to_str().unwrap(),
+        ],
+    );
+    e.ok(&["migrate", dir.to_str().unwrap()]);
+    assert_eq!(
+        e.git(&dir.join("main"), &["branch", "--show-current"]),
+        "main"
+    );
+}
+
+#[test]
+fn migrate_nearly_laid_out_project() {
+    let e = Env::new();
+    let wt = e.project("app");
+    let dir = e.root.join("app");
+    e.git(
+        &wt,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat/y",
+            dir.join("tmp").to_str().unwrap(),
+        ],
+    );
+    // The hand-made variant: `.git` pointing at `.bare`.
+    fs::write(dir.join(".git"), "gitdir: ./.bare\n").unwrap();
+
+    e.ok(&["migrate", dir.to_str().unwrap()]);
+    assert!(!dir.join(".git").exists());
+    assert!(!dir.join("tmp").exists());
+    assert_eq!(
+        e.git(&dir.join("feat-y"), &["branch", "--show-current"]),
+        "feat/y"
+    );
+}
+
+#[test]
+fn migrate_refuses_detached_head_and_linked_worktrees() {
+    let e = Env::new();
+    let src = e.upstream("x");
+    e.git(&src, &["checkout", "-q", "--detach"]);
+    let r = e.forest(&["migrate", src.to_str().unwrap()]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert!(src.join(".git").is_dir());
+    assert!(!e.root.join("x").exists());
+
+    let wt = e.project("app");
+    let r = e.forest(&["migrate", wt.to_str().unwrap()]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("linked worktree"), "{}", r.stderr);
+}
