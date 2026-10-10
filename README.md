@@ -99,5 +99,6 @@ With `--json`, `path`, `new` and `rm` describe their target the same way however
 ## Install
 
 ```sh
-cargo install --path .
+just install     # cargo install --path . --locked
+just uninstall
 ```
