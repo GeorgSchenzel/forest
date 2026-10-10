@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::Output;
+use crate::cmd::path::Identity;
 use crate::error::{Result, fail};
 use crate::layout::{Layout, Name, slug};
 use crate::project::{
@@ -41,7 +42,8 @@ fn new_worktree(
     branch: &str,
     from: Option<&str>,
 ) -> Result<Output> {
-    let path = layout.project_dir(project).join(slug(branch));
+    let dir = slug(branch);
+    let path = layout.project_dir(project).join(&dir);
     let existing = project_worktrees(layout, project)?;
     // An existing worktree may be addressed by its dir name; keep its real branch.
     let branch = existing_branch(&existing, &path)
@@ -51,11 +53,16 @@ fn new_worktree(
     eprintln!("{project}: {} {branch}", status.as_str());
     Ok(Output::new(
         format!("{}\n", path.display()),
-        json!({
-            "path": path,
-            "branch": branch,
+        Identity {
+            kind: "worktree",
+            name: project.to_string(),
+            dir,
+            branch: Some(branch.clone()),
+            path: path.clone(),
+        }
+        .with(json!({
             "worktrees": [{"project": project, "path": path, "status": status.as_str(), "error": null}],
-        }),
+        })),
     ))
 }
 
@@ -119,7 +126,7 @@ fn new_workforest(
     }
     let mut out = Output::new(
         format!("{}\n", dir.display()),
-        json!({"path": dir, "branch": branch, "worktrees": results}),
+        Identity::workforest(forest, &dir, Some(branch)).with(json!({"worktrees": results})),
     );
     if failed > 0 {
         eprintln!("forest: {failed} of {} projects failed", projects.len());

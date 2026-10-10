@@ -278,8 +278,8 @@ fn workforests(layout: &Layout, forest: &str, rows: &[Row]) -> Result<Vec<Workfo
         let path = canonical(&entry.path());
         let branch = rows
             .iter()
-            .find(|r| r.path.parent() == Some(path.as_path()))
-            .and_then(|r| r.branch.clone());
+            .filter(|r| r.path.parent() == Some(path.as_path()))
+            .find_map(|r| r.branch.clone());
         list.push(Workforest {
             dir: entry.file_name().to_string_lossy().into_owned(),
             path,

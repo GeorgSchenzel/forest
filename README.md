@@ -80,6 +80,14 @@ You address a target as `<project-or-forest>:<branch>`. Inside a project or fore
 
 Global flags: `--json` (versioned output for scripts) and `--root <path>`.
 
+With `--json`, `path`, `new` and `rm` describe their target the same way however it was given:
+
+```json
+{"v":1,"kind":"workforest","name":"shop","dir":"feat-y","branch":"feat/y","path":"/Users/me/projects/_forests/shop/feat-y"}
+```
+
+`kind` is `worktree` or `workforest`, `name` is the project or forest, and (`name`, `dir`) is unique. `branch` is `null` for a detached worktree, or a workforest with no worktree on a branch.
+
 ## Good to know
 
 - Branch folders are flat, so `feat/x` becomes `feat-x`. `ls` shows the real branch name.

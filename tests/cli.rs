@@ -628,3 +628,184 @@ fn prune_reports_workforest_without_worktrees() {
     let j = e.forest(&["prune", "--json"]).json();
     assert_eq!(j["orphans"][0], leftover.to_str().unwrap());
 }
+
+fn identity(kind: &str, name: &str, dir: &str, branch: Value, path: &Path) -> Value {
+    serde_json::json!({
+        "v": 1,
+        "kind": kind,
+        "name": name,
+        "dir": dir,
+        "branch": branch,
+        "path": path.to_str().unwrap(),
+    })
+}
+
+/// The identity fields of a JSON result, in order, without the command's own fields.
+fn identity_of(j: &Value) -> Value {
+    let keys = ["v", "kind", "name", "dir", "branch", "path"];
+    let obj = j.as_object().unwrap();
+    let got: Vec<_> = obj.keys().take(keys.len()).map(String::as_str).collect();
+    assert_eq!(got, keys, "{j}");
+    Value::Object(
+        obj.iter()
+            .filter(|(k, _)| keys.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    )
+}
+
+#[test]
+fn json_identity_of_a_worktree() {
+    let e = Env::new();
+    e.project("app");
+    let x = e.root.join("app/feat-x");
+    let want = identity("worktree", "app", "feat-x", "feat/x".into(), &x);
+
+    let r = e.forest(&["new", "app:feat/x", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let j = r.json();
+    assert_eq!(identity_of(&j), want);
+    assert_eq!(j["worktrees"][0]["status"], "created");
+    // Re-run by dir name: same identity, real branch.
+    assert_eq!(
+        identity_of(&e.forest(&["new", "app:feat-x", "--json"]).json()),
+        want
+    );
+
+    let deep = x.join("deep");
+    fs::create_dir_all(&deep).unwrap();
+    let runs = [
+        e.forest(&["path", "app:feat/x", "--json"]),
+        e.forest(&["path", "app:feat-x", "--json"]),
+        e.forest_in(&e.root.join("app/main"), &["path", "feat/x", "--json"]),
+        e.forest_in(&e.root.join("app"), &["path", "feat-x", "--json"]),
+        e.forest_in(&x, &["path", "--json"]),
+        e.forest_in(&deep, &["path", "--json"]),
+    ];
+    for r in &runs {
+        assert_eq!(r.code, 0, "{}", r.stderr);
+        assert_eq!(r.json(), want, "{}", r.stdout);
+    }
+    fs::remove_dir(&deep).unwrap();
+
+    let r = e.forest(&["rm", "app:feat/x", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let j = r.json();
+    assert_eq!(identity_of(&j), want);
+    assert_eq!(j["removed"][0]["path"], x.to_str().unwrap());
+    assert!(j.get("warnings").is_none(), "{j}");
+}
+
+#[test]
+fn json_identity_of_a_workforest() {
+    let e = Env::new();
+    e.project("api");
+    e.project("web");
+    e.forest_toml("shop", r#"["api", "web"]"#);
+    let wf = e.root.join("_forests/shop/feat-y");
+    let want = identity("workforest", "shop", "feat-y", "feat/y".into(), &wf);
+
+    let r = e.forest(&["new", "shop:feat/y", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let j = r.json();
+    assert_eq!(identity_of(&j), want);
+    assert_eq!(j["worktrees"].as_array().unwrap().len(), 2);
+
+    let runs = [
+        e.forest(&["path", "shop:feat/y", "--json"]),
+        e.forest(&["path", "shop:feat-y", "--json"]),
+        e.forest_in(&e.root.join("_forests/shop"), &["path", "feat/y", "--json"]),
+        e.forest_in(&wf.join("api"), &["path", "feat-y", "--json"]),
+        e.forest_in(&wf, &["path", "--json"]),
+        e.forest_in(&wf.join("web"), &["path", "--json"]),
+    ];
+    for r in &runs {
+        assert_eq!(r.code, 0, "{}", r.stderr);
+        assert_eq!(r.json(), want, "{}", r.stdout);
+    }
+
+    let r = e.forest(&["rm", "shop:feat/y", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let j = r.json();
+    assert_eq!(identity_of(&j), want);
+    assert_eq!(j["removed"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn json_identity_of_a_workforest_without_a_branch() {
+    let e = Env::new();
+    e.project("api");
+    e.forest_toml("shop", r#"["api"]"#);
+    let wf = e.root.join("_forests/shop/feat-big");
+    fs::create_dir_all(&wf).unwrap();
+    let want = identity("workforest", "shop", "feat-big", Value::Null, &wf);
+    assert_eq!(e.forest(&["path", "shop:feat-big", "--json"]).json(), want);
+    assert_eq!(e.forest_in(&wf, &["path", "--json"]).json(), want);
+
+    // A detached member doesn't give it a branch either.
+    let bare = e.root.join("api/.bare");
+    let member = wf.join("api");
+    e.git(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            member.to_str().unwrap(),
+            "main",
+        ],
+    );
+    assert_eq!(e.forest_in(&member, &["path", "--json"]).json(), want);
+    let ls = e.forest(&["ls", "shop", "--json"]).json();
+    assert_eq!(ls["forests"][0]["workforests"][0]["branch"], Value::Null);
+}
+
+#[test]
+fn json_errors_are_unchanged() {
+    let e = Env::new();
+    e.project("app");
+    for args in [
+        &["path", "app:nope", "--json"][..],
+        &["rm", "app:nope", "--json"],
+        &["new", "nope:x", "--json"],
+    ] {
+        let r = e.forest(args);
+        assert_eq!(r.code, 1);
+        let j = r.json();
+        let keys: Vec<_> = j.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["v", "error"], "{j}");
+        assert_eq!(j["error"]["code"], "error");
+        assert!(j["error"]["message"].is_string());
+    }
+    let r = e.forest(&["rm", "app:main", "--json"]);
+    assert_eq!(r.code, 2);
+    assert_eq!(r.json()["error"]["code"], "refused");
+}
+
+#[test]
+fn rm_warns_when_cwd_is_inside_the_target() {
+    let e = Env::new();
+    e.project("app");
+    let x = PathBuf::from(e.ok(&["new", "app:feat/x"]));
+    let r = e.forest_in(&x, &["rm"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("warning: the current directory"),
+        "{}",
+        r.stderr
+    );
+
+    let x = PathBuf::from(e.ok(&["new", "app:feat/x"]));
+    let r = e.forest_in(&x, &["rm", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(!r.stderr.contains("warning"), "{}", r.stderr);
+    let warnings = r.json()["warnings"].as_array().unwrap().clone();
+    assert_eq!(warnings.len(), 1);
+    assert!(!x.exists());
+
+    // Not inside: no warning.
+    e.ok(&["new", "app:feat/x"]);
+    let r = e.forest(&["rm", "app:feat/x"]);
+    assert!(!r.stderr.contains("warning"), "{}", r.stderr);
+}

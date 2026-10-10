@@ -1,5 +1,6 @@
 //! `rm`: remove a worktree or a whole workforest, refusing anything that could lose work.
 
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -26,6 +27,9 @@ pub fn rm(
     delete_branch: bool,
 ) -> Result<Output> {
     let located = locate(layout, target)?;
+    let identity = located.identity(layout)?;
+    // Before removing: a deleted cwd can't be resolved.
+    let cwd_in_target = env::current_dir().is_ok_and(|c| canonical(&c).starts_with(&identity.path));
     let (items, orphans, workforest) = match located {
         Located::Worktree { project, worktree } => {
             let item = Item {
@@ -101,9 +105,18 @@ pub fn rm(
     for e in &errors {
         eprintln!("forest: {e}");
     }
-    let mut out = Output::new(text, json!({"removed": removed, "errors": errors}));
+    let mut out = Output::new(
+        text,
+        identity.with(json!({"removed": removed, "errors": errors})),
+    );
     if !errors.is_empty() {
         out.code = 1;
+    }
+    if cwd_in_target {
+        out.warnings.push(format!(
+            "the current directory was inside {}; cd elsewhere",
+            identity.path.display()
+        ));
     }
     Ok(out)
 }

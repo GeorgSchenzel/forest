@@ -1,8 +1,9 @@
 //! `path`, and resolving a target (or cwd) to a worktree or workforest.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use serde_json::json;
+use serde::Serialize;
+use serde_json::{Value, json};
 
 use crate::Output;
 use crate::error::{Result, fail};
@@ -11,7 +12,56 @@ use crate::project::{Worktree, worktrees};
 
 pub enum Located {
     Worktree { project: String, worktree: Worktree },
-    Workforest { dir: PathBuf },
+    Workforest { forest: String, dir: PathBuf },
+}
+
+/// What a worktree or workforest is, the same however it was addressed. In JSON
+/// output, next to the command's own fields.
+#[derive(Serialize)]
+pub struct Identity {
+    /// `"worktree"` or `"workforest"`.
+    pub kind: &'static str,
+    /// The project or forest: the `<name>` in `<name>:<branch>`.
+    pub name: String,
+    pub dir: String,
+    /// `None` when detached, or for a workforest without a worktree on a branch.
+    pub branch: Option<String>,
+    pub path: PathBuf,
+}
+
+impl Identity {
+    pub fn worktree(project: &str, worktree: &Worktree) -> Self {
+        Identity {
+            kind: "worktree",
+            name: project.to_string(),
+            dir: worktree.dir_name(),
+            branch: worktree.branch.clone(),
+            path: worktree.path.clone(),
+        }
+    }
+
+    /// `branch` as `ls` reports it: that of the first member worktree on one.
+    pub fn workforest(forest: &str, dir: &Path, branch: Option<String>) -> Self {
+        Identity {
+            kind: "workforest",
+            name: forest.to_string(),
+            dir: dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            branch,
+            path: dir.to_path_buf(),
+        }
+    }
+
+    /// The identity's fields, then `extra`'s.
+    pub fn with(&self, extra: Value) -> Value {
+        let mut out = json!(self);
+        if let (Value::Object(out), Value::Object(extra)) = (&mut out, extra) {
+            out.extend(extra);
+        }
+        out
+    }
 }
 
 impl Located {
@@ -21,6 +71,15 @@ impl Located {
             Located::Workforest { dir, .. } => dir,
         }
     }
+
+    pub fn identity(&self, layout: &Layout) -> Result<Identity> {
+        Ok(match self {
+            Located::Worktree { project, worktree } => Identity::worktree(project, worktree),
+            Located::Workforest { forest, dir } => {
+                Identity::workforest(forest, dir, workforest_branch(layout, forest, dir)?)
+            }
+        })
+    }
 }
 
 pub fn path(layout: &Layout, target: Option<&str>) -> Result<Output> {
@@ -28,8 +87,25 @@ pub fn path(layout: &Layout, target: Option<&str>) -> Result<Output> {
     let path = located.path();
     Ok(Output::new(
         format!("{}\n", path.display()),
-        json!({"path": path}),
+        located.identity(layout)?.with(json!({})),
     ))
+}
+
+/// The branch of the first of the forest's projects with a worktree in `dir`.
+fn workforest_branch(layout: &Layout, forest: &str, dir: &Path) -> Result<Option<String>> {
+    for project in layout.forest_projects(forest)? {
+        if !layout.is_project(&project) {
+            continue;
+        }
+        if let Some(w) = worktrees(&layout.bare(&project))?
+            .into_iter()
+            .find(|w| w.path.parent() == Some(dir))
+            && w.branch.is_some()
+        {
+            return Ok(w.branch);
+        }
+    }
+    Ok(None)
 }
 
 /// A target names a project worktree (in the project dir) or a workforest; without
@@ -104,5 +180,8 @@ fn find_worktree(
 
 fn find_workforest(layout: &Layout, forest: &str, dir_name: &str) -> Option<Located> {
     let dir = layout.forest_dir(forest).join(dir_name);
-    dir.is_dir().then_some(Located::Workforest { dir })
+    dir.is_dir().then(|| Located::Workforest {
+        forest: forest.to_string(),
+        dir,
+    })
 }

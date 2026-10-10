@@ -90,6 +90,8 @@ pub struct Output {
     pub text: String,
     pub json: Value,
     pub code: i32,
+    /// Shown on stderr, or as `"warnings"` with `--json`; they don't fail the command.
+    pub warnings: Vec<String>,
 }
 
 impl Output {
@@ -98,6 +100,7 @@ impl Output {
             text: text.into(),
             json,
             code: 0,
+            warnings: Vec::new(),
         }
     }
 }
@@ -150,10 +153,18 @@ fn main() {
     };
     let as_json = cli.json;
     match run(cli) {
-        Ok(out) => {
+        Ok(mut out) => {
             if as_json {
+                if !out.warnings.is_empty()
+                    && let Value::Object(fields) = &mut out.json
+                {
+                    fields.insert("warnings".into(), json!(out.warnings));
+                }
                 println!("{}", versioned(out.json));
             } else {
+                for w in &out.warnings {
+                    eprintln!("forest: warning: {w}");
+                }
                 print!("{}", out.text);
             }
             exit(out.code);
