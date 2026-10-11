@@ -71,6 +71,7 @@ You address a target as `<project-or-forest>:<branch>`. Inside a project or fore
 |---|---|
 | `init <name> [--branch <b>]` | New project with no remote |
 | `clone <url> [name]` | New project from a remote, or from a local repo |
+| `migrate <path> [name]` | Move an existing clone or bare repo into the layout |
 | `define <forest> [projects…] [--add/--remove <p>…]` | Create a forest or change its projects |
 | `new <target> [--from <ref>]` | Create a worktree, or one per project of a forest. Re-running fills any gaps |
 | `ls [name]` | List projects, forests and worktrees with their status |
@@ -94,11 +95,12 @@ With `--json`, `path`, `new` and `rm` describe their target the same way however
 - `new` uses an existing local branch, else the remote branch (with tracking), else creates a new branch from `--from` or the default branch.
 - Git allows a branch to be checked out in only one worktree. This means a forest can't check out `main`, because each project's `main/` folder already holds it.
 - `rm` never loses commits. It refuses if there are uncommitted changes or if you target a default-branch worktree. `--delete-branch` only deletes a branch that is merged, pushed, or whose upstream is gone.
+- `migrate` moves the working tree instead of checking it out again, so staged, untracked and ignored files survive. Other worktrees are moved to their branch folders. It refuses a detached HEAD or an operation in progress, and a repo outside the root must be on the same filesystem.
 - Exit codes: `0` ok, `1` error, `2` refused by a safety check.
 
 ## Install
 
 ```sh
-just install     # cargo install --path . --locked
+just install     # cargo install --path . --locked --force
 just uninstall
 ```
