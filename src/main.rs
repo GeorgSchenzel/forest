@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::exit;
 
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{Map, Value, json};
 
 use crate::error::Result;
@@ -121,6 +121,27 @@ in it are removed too.")]
     },
     /// Prune stale worktree metadata and report orphaned dirs
     Prune,
+    /// Print the shell code for `fcd` and completion
+    #[command(after_help = "\
+Add to ~/.zshrc:
+  eval \"$(forest shell-init zsh)\"
+
+fcd [target [repo]] goes where `forest path` points.")]
+    ShellInit {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+    /// Completion candidates for the shell
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        words: Vec<String>,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Shell {
+    Zsh,
 }
 
 /// What a command prints: `text` normally, `json` with `--json`.
@@ -177,6 +198,8 @@ fn run(cli: Cli) -> Result<Output> {
             delete_branch,
         } => cmd::clean::clean(&layout, dry_run, delete_branch),
         Command::Prune => cmd::prune::prune(&layout),
+        Command::ShellInit { shell: Shell::Zsh } => Ok(cmd::shell::shell_init()),
+        Command::Complete { words } => Ok(cmd::complete::complete(&layout, &words)),
     }
 }
 

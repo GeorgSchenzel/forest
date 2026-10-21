@@ -450,6 +450,80 @@ fn path_steps_into_the_only_worktree() {
     assert!(!forest_dir(&e, "feat-x").exists());
 }
 
+fn complete(e: &Env, words: &[&str]) -> Vec<String> {
+    let mut args = vec!["__complete", "--"];
+    args.extend(words);
+    e.ok(&args).lines().map(String::from).collect()
+}
+
+#[test]
+fn completion() {
+    let e = Env::new();
+    e.project("api");
+    e.project("web");
+    e.ok(&["new", "feat/y", "api", "web", "--as", "shop"]);
+    e.ok(&["new", "feat/x", "api"]);
+
+    let subs = complete(&e, &["forest", ""]);
+    assert!(subs.contains(&"path".into()) && subs.contains(&"shell-init".into()));
+    assert!(!subs.iter().any(|s| s.starts_with("__")), "{subs:?}");
+
+    let targets = ["api", "feat-x", "feat/x", "feat/y", "shop", "web"];
+    assert_eq!(complete(&e, &["forest", "path", ""]), targets);
+    assert_eq!(complete(&e, &["forest", "--json", "rm", "f"]), targets);
+    assert_eq!(complete(&e, &["fcd", ""]), targets);
+    // The second word is a repo of that forest, or any repo.
+    assert_eq!(complete(&e, &["fcd", "feat/x", ""]), ["api"]);
+    assert_eq!(
+        complete(&e, &["forest", "path", "shop", ""]),
+        ["api", "web"]
+    );
+    assert_eq!(
+        complete(&e, &["forest", "path", "main", ""]),
+        ["api", "web"]
+    );
+    assert_eq!(
+        complete(&e, &["forest", "path", "shop", "api", ""]),
+        [] as [&str; 0]
+    );
+
+    assert_eq!(complete(&e, &["forest", "mv", ""]), ["feat-x", "shop"]);
+    assert_eq!(complete(&e, &["forest", "new", ""]), ["feat/x", "feat/y"]);
+    assert_eq!(complete(&e, &["forest", "new", "b", "api", ""]), ["web"]);
+    // A flag's value is skipped, and isn't a positional.
+    assert_eq!(
+        complete(&e, &["forest", "new", "--from", "main", "b", ""]),
+        ["api", "web"]
+    );
+    assert_eq!(
+        complete(&e, &["forest", "new", "b", "--from", ""]),
+        [] as [&str; 0]
+    );
+    assert_eq!(complete(&e, &["forest", "--root", ""]), [":files"]);
+    assert_eq!(complete(&e, &["forest", "migrate", ""]), [":files"]);
+
+    let flags = complete(&e, &["forest", "rm", "-"]);
+    assert!(flags.contains(&"--delete-branch".into()) && flags.contains(&"--json".into()));
+
+    // `--root` on the line being completed is the root to look in.
+    let other = e.base.join("other");
+    fs::create_dir_all(&other).unwrap();
+    let root = other.to_str().unwrap();
+    assert_eq!(
+        complete(&e, &["forest", "--root", root, "path", ""]),
+        [] as [&str; 0]
+    );
+}
+
+#[test]
+fn shell_init_defines_fcd_and_completion() {
+    let e = Env::new();
+    let out = e.ok(&["shell-init", "zsh"]);
+    assert!(out.contains("fcd()"), "{out}");
+    assert!(out.contains("compdef _forest forest fcd"), "{out}");
+    assert!(out.contains("add-zsh-hook precmd _forest_compdef"), "{out}");
+}
+
 #[test]
 fn rm_refuses_dirty_worktrees() {
     let e = Env::new();
