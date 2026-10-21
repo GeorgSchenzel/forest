@@ -14,9 +14,16 @@ use serde_json::{Map, Value, json};
 use crate::error::Result;
 use crate::layout::Layout;
 
+const TARGETS: &str = "\
+Targets:
+  <project>:<branch>  a worktree, in its project or in a forest
+  :<branch>           a worktree of the project you are in
+  <forest>            a forest (a word without ':')
+  (none)              the worktree or forest you are in";
+
 /// Worktree & forest manager.
 #[derive(Parser)]
-#[command(name = "forest", version)]
+#[command(name = "forest", version, after_help = TARGETS)]
 struct Cli {
     /// Machine-readable JSON output
     #[arg(long, global = true)]
@@ -46,15 +53,28 @@ enum Command {
         /// Project name (default: the directory's name, without `.git`)
         name: Option<String>,
     },
-    /// Create a worktree, or a forest of worktrees across projects
+    /// Create a worktree, or a forest with one worktree per project
+    #[command(
+        override_usage = "\
+forest new <PROJECT>:<BRANCH> [--from <REF>]
+       forest new :<BRANCH> [--from <REF>]
+       forest new <BRANCH> <PROJECT>... [--name <NAME>] [--from <REF>]",
+        after_help = "\
+Examples:
+  forest new api:feat/x             api/feat-x/
+  forest new feat/y api web         _forests/feat-y/{api,web}/, all on feat/y
+  forest new feat/y api --name y    _forests/y/api/"
+    )]
     New {
-        /// <project>:<branch> (or a branch in the current project); with projects, the forest's name
+        /// <project>:<branch> or :<branch> for a worktree; the branch of a forest
+        #[arg(value_name = "TARGET")]
         target: String,
-        /// Projects of a new forest
+        /// Projects of a new forest; given at least one, a forest is made
+        #[arg(value_name = "PROJECT")]
         projects: Vec<String>,
-        /// The forest's branch (default: its name)
-        #[arg(long, value_name = "BRANCH")]
-        branch: Option<String>,
+        /// The forest's name (default: the branch, with '/' as '-')
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
         /// Start a new branch from this ref instead of the default branch
         #[arg(long, value_name = "REF")]
         from: Option<String>,
@@ -65,13 +85,15 @@ enum Command {
         name: Option<String>,
     },
     /// Print the absolute path of a worktree or forest
+    #[command(after_help = TARGETS)]
     Path {
-        /// <project>:<branch>, a forest, a branch in the current project, or cwd's worktree/forest
+        /// <project>:<branch>, :<branch>, or <forest>; default: where you are
         target: Option<String>,
     },
     /// Remove a worktree or forest
+    #[command(after_help = TARGETS)]
     Rm {
-        /// <project>:<branch>, a forest, a branch in the current project, or cwd's worktree/forest
+        /// <project>:<branch>, :<branch>, or <forest>; default: where you are
         target: Option<String>,
         /// Override the safety checks
         #[arg(long)]
@@ -113,13 +135,13 @@ fn run(cli: Cli) -> Result<Output> {
         Command::New {
             target,
             projects,
-            branch,
+            name,
             from,
         } => cmd::new::new(
             &layout,
             &target,
             &projects,
-            branch.as_deref(),
+            name.as_deref(),
             from.as_deref(),
         ),
         Command::Ls { name } => cmd::ls::ls(&layout, name.as_deref()),

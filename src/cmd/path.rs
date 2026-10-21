@@ -27,16 +27,20 @@ pub struct Identity {
     /// `None` when detached, or for a forest without a worktree on a branch.
     pub branch: Option<String>,
     pub path: PathBuf,
+    /// The forest a worktree belongs to; `None` for one in its project dir, and for
+    /// a forest itself.
+    pub forest: Option<String>,
 }
 
 impl Identity {
-    pub fn worktree(project: &str, worktree: &Worktree) -> Self {
+    pub fn worktree(layout: &Layout, project: &str, worktree: &Worktree) -> Self {
         Identity {
             kind: "worktree",
             name: project.to_string(),
             dir: worktree.dir_name(),
             branch: worktree.branch.clone(),
             path: worktree.path.clone(),
+            forest: layout.forest_of(&worktree.path),
         }
     }
 
@@ -48,6 +52,7 @@ impl Identity {
             dir: forest.to_string(),
             branch,
             path: dir.to_path_buf(),
+            forest: None,
         }
     }
 
@@ -71,7 +76,9 @@ impl Located {
 
     pub fn identity(&self, layout: &Layout) -> Result<Identity> {
         Ok(match self {
-            Located::Worktree { project, worktree } => Identity::worktree(project, worktree),
+            Located::Worktree { project, worktree } => {
+                Identity::worktree(layout, project, worktree)
+            }
             Located::Forest { forest, dir } => {
                 Identity::forest(forest, dir, forest_branch(layout, dir)?)
             }
@@ -102,26 +109,27 @@ fn forest_branch(layout: &Layout, dir: &Path) -> Result<Option<String>> {
     Ok(None)
 }
 
-/// A target is `<project>:<branch>`, or a bare word: a worktree of the project cwd
-/// is in, else a forest. Without one, it is the worktree or forest cwd is in.
+/// A target is `<project>:<branch>` (or `:<branch>` in the current project), a
+/// worktree wherever it is, or a bare word, a forest. Without one, it is the worktree
+/// or forest cwd is in.
 pub fn locate(layout: &Layout, target: Option<&str>) -> Result<Located> {
     let Some(t) = target else {
         return locate_cwd(layout);
     };
-    let found = match layout.split_target(t)? {
-        Some((p, branch)) => find_worktree_by_branch(layout, &p, &branch)?,
-        None => {
-            let in_project = match layout.context_project() {
-                Some(p) => find_worktree_by_branch(layout, &p, t)?,
-                None => None,
-            };
-            match in_project {
-                Some(found) => Some(found),
-                None => find_forest(layout, t),
-            }
-        }
-    };
-    found.ok_or_else(|| fail!("no worktree or forest found for '{t}'"))
+    if let Some((p, branch)) = layout.split_target(t)? {
+        return find_worktree_by_branch(layout, &p, &branch)?
+            .ok_or_else(|| fail!("no worktree of {p} on '{branch}'"));
+    }
+    if let Some(found) = find_forest(layout, t) {
+        return Ok(found);
+    }
+    // A branch of the current project was likely meant.
+    if let Some(p) = layout.context_project()
+        && find_worktree_by_branch(layout, &p, t)?.is_some()
+    {
+        return Err(fail!("no forest named '{t}'; for the branch, write ':{t}'"));
+    }
+    Err(fail!("no forest named '{t}'"))
 }
 
 fn locate_cwd(layout: &Layout) -> Result<Located> {
@@ -135,46 +143,45 @@ fn locate_cwd(layout: &Layout) -> Result<Located> {
                 return Err(fail!("not inside a worktree of '{p}'; give a branch"));
             };
             let path = layout.project_dir(&p).join(&sub);
-            find_worktree(layout, &p, &[&|w| w.path == path])?
+            find_worktree(layout, &p, |list| list.iter().position(|w| w.path == path))?
         }
     }
     .ok_or_else(|| fail!("the current directory is not in a worktree or forest"))
 }
 
-/// The real branch name wins over a dir name that happens to equal it.
+/// The worktree on `branch`, in the project dir or a forest (git checks a branch out
+/// at most once), else the one in the project dir whose dir name is `branch`.
 fn find_worktree_by_branch(
     layout: &Layout,
     project: &str,
     branch: &str,
 ) -> Result<Option<Located>> {
-    find_worktree(
-        layout,
-        project,
-        &[&|w| w.branch.as_deref() == Some(branch), &|w| {
-            w.dir_name() == branch
-        }],
-    )
+    let dir = layout.project_dir(project);
+    find_worktree(layout, project, |list| {
+        list.iter()
+            .position(|w| {
+                w.branch.as_deref() == Some(branch)
+                    && (w.path.parent() == Some(dir.as_path())
+                        || layout.forest_of(&w.path).is_some())
+            })
+            .or_else(|| {
+                list.iter()
+                    .position(|w| w.path.parent() == Some(dir.as_path()) && w.dir_name() == branch)
+            })
+    })
 }
 
-/// The first worktree in the project dir matching the first `preds` entry that
-/// matches any.
+/// The worktree of `project` that `pick` chooses.
 fn find_worktree(
     layout: &Layout,
     project: &str,
-    preds: &[&dyn Fn(&Worktree) -> bool],
+    pick: impl Fn(&[Worktree]) -> Option<usize>,
 ) -> Result<Option<Located>> {
-    let dir = layout.project_dir(project);
-    let mut list: Vec<Worktree> = worktrees(&layout.bare(project))?
-        .into_iter()
-        .filter(|w| w.path.parent() == Some(dir.as_path()))
-        .collect();
-    Ok(preds
-        .iter()
-        .find_map(|pred| list.iter().position(pred))
-        .map(|i| Located::Worktree {
-            project: project.to_string(),
-            worktree: list.swap_remove(i),
-        }))
+    let mut list = worktrees(&layout.bare(project))?;
+    Ok(pick(&list).map(|i| Located::Worktree {
+        project: project.to_string(),
+        worktree: list.swap_remove(i),
+    }))
 }
 
 fn find_forest(layout: &Layout, forest: &str) -> Option<Located> {

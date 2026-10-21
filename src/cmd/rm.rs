@@ -98,6 +98,17 @@ pub fn rm(
             }
         }
     }
+    // A forest whose last member was removed goes too.
+    if forest.is_none()
+        && let Some(item) = items.first()
+        && errors.is_empty()
+        && layout.forest_of(&item.path).is_some()
+        && let Some(dir) = item.path.parent()
+        && fs::read_dir(dir).is_ok_and(|mut d| d.next().is_none())
+        && fs::remove_dir(dir).is_ok()
+    {
+        text.push_str(&format!("removed {}\n", dir.display()));
+    }
     if !errors.is_empty() && removed.is_empty() {
         return Err(fail!("{}", errors.join("\n")));
     }

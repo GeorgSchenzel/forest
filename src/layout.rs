@@ -136,13 +136,22 @@ impl Layout {
         })
     }
 
-    /// Splits `<project>:<branch>`; `None` for a word without `:`.
+    /// Splits `<project>:<branch>`, or `:<branch>` in the project cwd is in; `None`
+    /// for a word without `:`, which names a forest.
     pub fn split_target(&self, s: &str) -> Result<Option<(String, String)>> {
         let Some((project, branch)) = s.split_once(':') else {
             return Ok(None);
         };
-        if project.is_empty() || branch.is_empty() {
+        if branch.is_empty() {
             return Err(fail!("invalid target '{s}': expected <project>:<branch>"));
+        }
+        if project.is_empty() {
+            return match self.context_project() {
+                Some(p) => Ok(Some((p, branch.to_string()))),
+                None => Err(fail!(
+                    "'{s}' needs a project: run it inside one, or write <project>{s}"
+                )),
+            };
         }
         if !self.is_project(project) {
             return Err(fail!(
@@ -151,6 +160,13 @@ impl Layout {
             ));
         }
         Ok(Some((project.to_string(), branch.to_string())))
+    }
+
+    /// The forest a worktree at `path` belongs to: `<root>/_forests/<forest>/<project>`.
+    pub fn forest_of(&self, path: &Path) -> Option<String> {
+        let rel = path.strip_prefix(self.root.join(FORESTS)).ok()?;
+        let parts: Vec<_> = rel.iter().collect();
+        (parts.len() == 2).then(|| parts[0].to_string_lossy().into_owned())
     }
 
     /// The project cwd is in, if any.

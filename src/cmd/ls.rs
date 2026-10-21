@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::Output;
 use crate::error::Result;
 use crate::git::git;
-use crate::layout::{FORESTS, Layout, Name};
+use crate::layout::{Layout, Name};
 use crate::project::{default_branch, origin_url, worktrees};
 
 #[derive(Serialize)]
@@ -177,21 +177,9 @@ pub fn ls(layout: &Layout, name: Option<&str>) -> Result<Output> {
 }
 
 fn project_rows(layout: &Layout, project: &str) -> Result<Vec<Row>> {
-    let forests_dir = layout.root.join(FORESTS);
     let mut rows = Vec::new();
     for w in worktrees(&layout.bare(project))? {
-        // <root>/_forests/<forest>/<project>
-        let in_forest = w
-            .path
-            .strip_prefix(&forests_dir)
-            .ok()
-            .map(|rel| {
-                rel.iter()
-                    .map(|c| c.to_string_lossy().into_owned())
-                    .collect::<Vec<_>>()
-            })
-            .filter(|parts| parts.len() == 2);
-        let forest = in_forest.map(|parts| parts[0].clone());
+        let forest = layout.forest_of(&w.path);
         let dir = w.dir_name();
         let row = Row {
             project: project.to_string(),

@@ -210,6 +210,70 @@ fn new_resolves_local_remote_and_new_branches() {
 
     // Unknown --from on a project is an error.
     assert_eq!(e.forest(&["new", "svc:x", "--from", "nope"]).code, 1);
+    // So is --from for a branch that exists.
+    e.git(&bare, &["branch", "old", "feat/new"]);
+    let r = e.forest(&["new", "svc:old", "--from", "main"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("already exists locally"), "{}", r.stderr);
+    assert!(!e.root.join("svc/old").exists());
+}
+
+#[test]
+fn new_reports_how_the_branch_was_set_up() {
+    let e = Env::new();
+    let up = e.upstream("svc");
+    e.git(&up, &["branch", "feat/remote"]);
+    e.ok(&["clone", up.to_str().unwrap()]);
+    e.git(&e.root.join("svc/.bare"), &["branch", "local", "main"]);
+
+    let cases = [
+        (
+            "svc:feat/remote",
+            "created branch feat/remote tracking origin/feat/remote",
+            true,
+            Value::from("origin/feat/remote"),
+        ),
+        (
+            "svc:feat/new",
+            "created branch feat/new from origin/main",
+            true,
+            Value::from("origin/main"),
+        ),
+        ("svc:local", "checked out branch local", false, Value::Null),
+    ];
+    for (target, msg, created, from) in cases {
+        let r = e.forest(&["new", target, "--json"]);
+        assert_eq!(r.code, 0, "{}", r.stderr);
+        assert!(r.stderr.contains(&format!("svc: {msg}")), "{}", r.stderr);
+        let w = &r.json()["worktrees"][0];
+        assert_eq!(w["branch_created"], created, "{target}");
+        assert_eq!(w["from"], from, "{target}");
+    }
+}
+
+#[test]
+fn forest_members_are_worktrees() {
+    let e = Env::new();
+    e.project("api");
+    e.project("web");
+    let wf = PathBuf::from(e.ok(&["new", "feat/y", "api", "web", "--name", "shop"]));
+
+    // <project>:<branch> finds a worktree in a forest too.
+    let r = e.forest(&["path", "api:feat/y", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let j = r.json();
+    assert_eq!(j["kind"], "worktree");
+    assert_eq!(j["path"], wf.join("api").to_str().unwrap());
+    assert_eq!(j["forest"], "shop");
+    let r = e.forest_in(&e.root.join("api/main"), &["path", ":feat/y"]);
+    assert_eq!(r.stdout.trim(), wf.join("api").to_str().unwrap());
+
+    // Removing one member keeps the forest, the last one removes it.
+    e.ok(&["rm", "api:feat/y"]);
+    assert!(!wf.join("api").exists() && wf.join("web").exists());
+    let out = e.ok(&["rm", "web:feat/y"]);
+    assert!(out.ends_with(&format!("removed {}", wf.display())), "{out}");
+    assert!(!wf.exists());
 }
 
 #[test]
@@ -233,7 +297,7 @@ fn new_rejects_dir_collision_and_double_checkout() {
     assert_eq!(r.code, 1);
     assert!(r.stderr.contains("already exists"), "{}", r.stderr);
 
-    let r = e.forest(&["new", "shop", "app", "--branch", "main"]);
+    let r = e.forest(&["new", "main", "app", "--name", "shop"]);
     assert_eq!(r.code, 1);
     assert!(r.stderr.contains("already checked out at"), "{}", r.stderr);
     assert!(!e.root.join("_forests/shop").exists());
@@ -246,7 +310,7 @@ fn cwd_context() {
     let sub = main.join("deep/dir");
     fs::create_dir_all(&sub).unwrap();
 
-    let r = e.forest_in(&sub, &["new", "feat/x"]);
+    let r = e.forest_in(&sub, &["new", ":feat/x"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert_eq!(r.stdout.trim(), e.root.join("app/feat-x").to_str().unwrap());
 
@@ -256,27 +320,28 @@ fn cwd_context() {
     let r = e.forest_in(&e.root.join("app"), &["path"]);
     assert_eq!(r.code, 1);
 
-    let r = e.forest_in(&e.base, &["path", "feat/x"]);
+    let r = e.forest_in(&e.base, &["path", ":feat/x"]);
     assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("needs a project"), "{}", r.stderr);
     let r = e.forest_in(&e.base, &["new", "feat/y"]);
     assert_eq!(r.code, 1);
-    assert!(r.stderr.contains("<project>:<branch>"), "{}", r.stderr);
+    assert!(r.stderr.contains("<project>:feat/y"), "{}", r.stderr);
 
-    // In a project, a bare word is a branch there first, else a forest.
+    // A bare word is always a forest, even inside a project; a branch takes a ':'.
     e.ok(&["new", "app:both"]);
-    e.ok(&["new", "both", "app", "--branch", "feat/b"]);
+    e.ok(&["new", "feat/b", "app", "--name", "both"]);
     let r = e.forest_in(&sub, &["path", "both"]);
-    assert_eq!(r.stdout.trim(), e.root.join("app/both").to_str().unwrap());
-    assert_eq!(
-        e.ok(&["path", "both"]),
-        e.root.join("_forests/both").to_str().unwrap()
-    );
-    e.ok(&["new", "spike", "app"]);
-    let r = e.forest_in(&sub, &["path", "spike"]);
     assert_eq!(
         r.stdout.trim(),
-        e.root.join("_forests/spike").to_str().unwrap()
+        e.root.join("_forests/both").to_str().unwrap()
     );
+    let r = e.forest_in(&sub, &["path", ":both"]);
+    assert_eq!(r.stdout.trim(), e.root.join("app/both").to_str().unwrap());
+
+    // A bare word that is only a branch here hints at ':'.
+    let r = e.forest_in(&sub, &["path", "feat/x"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("write ':feat/x'"), "{}", r.stderr);
 }
 
 #[test]
@@ -289,7 +354,7 @@ fn forest_new_is_all_or_nothing() {
     e.git(&api_bare, &["branch", "feat/old", "main"]);
 
     // One project fails: the others are rolled back, but an existing branch stays.
-    let r = e.forest(&["new", "shop", "web", "api", "empty", "--branch", "feat/old"]);
+    let r = e.forest(&["new", "feat/old", "web", "api", "empty", "--name", "shop"]);
     assert_eq!(r.code, 1);
     assert!(r.stderr.contains("nothing was created"), "{}", r.stderr);
     assert!(!e.root.join("_forests/shop").exists());
@@ -303,7 +368,7 @@ fn forest_new_is_all_or_nothing() {
     );
     assert!(!e.git(&api_bare, &["worktree", "list"]).contains("_forests"));
 
-    // The branch defaults to the forest's name.
+    // The name defaults to the branch.
     let wf = e.root.join("_forests/shop");
     let r = e.forest(&["new", "shop", "api", "web", "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
@@ -326,10 +391,10 @@ fn forest_new_is_all_or_nothing() {
     let r = e.forest_in(&wf.join("web"), &["path"]);
     assert_eq!(r.stdout.trim(), wf.to_str().unwrap());
 
-    // --from is used where it exists, else the default branch.
+    // --from is used in each project.
     e.commit(&wf.join("api"), "api work");
     e.ok(&[
-        "new", "z", "api", "web", "--from", "shop", "--branch", "feat/z",
+        "new", "feat/z", "api", "web", "--from", "shop", "--name", "z",
     ]);
     let z = e.root.join("_forests/z");
     assert_eq!(
@@ -352,6 +417,18 @@ fn forest_new_is_all_or_nothing() {
     assert!(forests.contains(&Value::Null));
     let out = e.ok(&["ls", "z"]);
     assert!(out.starts_with("z  feat/z\n  api "), "{out}");
+
+    // A --from missing in any project fails the whole forest.
+    e.git(&api_bare, &["branch", "only-api", "main"]);
+    let r = e.forest(&["new", "feat/w", "api", "web", "--from", "only-api"]);
+    assert_eq!(r.code, 1);
+    assert!(
+        r.stderr.contains("ref 'only-api' not found in web"),
+        "{}",
+        r.stderr
+    );
+    assert!(!e.root.join("_forests/feat-w").exists());
+    assert!(e.git(&api_bare, &["branch", "--list", "feat/w"]).is_empty());
 }
 
 #[test]
@@ -363,9 +440,14 @@ fn forest_names_are_checked() {
     assert!(r.stderr.contains("can't share its name"), "{}", r.stderr);
     assert_eq!(e.forest(&["new", "a:b", "app"]).code, 1);
     assert_eq!(e.forest(&["new", "x", "nope"]).code, 1);
-    assert_eq!(e.forest(&["new", "app:x", "--branch", "y"]).code, 1);
-    e.ok(&["new", "shop", "app", "--branch", "feat/s"]);
+    assert_eq!(e.forest(&["new", "app:x", "--name", "y"]).code, 1);
+    e.ok(&["new", "feat/s", "app", "--name", "shop"]);
     assert_eq!(e.forest(&["init", "shop"]).code, 1);
+    // Without --name, the forest is named after the branch's dir name.
+    assert_eq!(
+        e.ok(&["new", "feat/t", "app"]),
+        e.root.join("_forests/feat-t").to_str().unwrap()
+    );
 }
 
 #[test]
@@ -504,7 +586,7 @@ fn forest_rm_finds_missing_members_and_keeps_strays() {
     let e = Env::new();
     e.project("api");
     e.project("web");
-    let wf = PathBuf::from(e.ok(&["new", "shop", "api", "web", "--branch", "feat/y"]));
+    let wf = PathBuf::from(e.ok(&["new", "feat/y", "api", "web", "--name", "shop"]));
     fs::remove_dir_all(wf.join("web")).unwrap();
     fs::create_dir_all(wf.join("notes")).unwrap();
     fs::write(wf.join("notes/todo"), "x").unwrap();
@@ -525,7 +607,7 @@ fn forest_rm_finds_missing_members_and_keeps_strays() {
     assert!(!e.git(&web_bare, &["worktree", "list"]).contains("shop"));
 
     // Nothing still holds the branch, so a forest on it can be made again.
-    e.ok(&["new", "shop2", "api", "web", "--branch", "feat/y"]);
+    e.ok(&["new", "feat/y", "api", "web", "--name", "shop2"]);
 }
 
 #[test]
@@ -615,12 +697,13 @@ fn identity(kind: &str, name: &str, dir: &str, branch: Value, path: &Path) -> Va
         "dir": dir,
         "branch": branch,
         "path": path.to_str().unwrap(),
+        "forest": null,
     })
 }
 
 /// The identity fields of a JSON result, in order, without the command's own fields.
 fn identity_of(j: &Value) -> Value {
-    let keys = ["v", "kind", "name", "dir", "branch", "path"];
+    let keys = ["v", "kind", "name", "dir", "branch", "path", "forest"];
     let obj = j.as_object().unwrap();
     let got: Vec<_> = obj.keys().take(keys.len()).map(String::as_str).collect();
     assert_eq!(got, keys, "{j}");
@@ -649,8 +732,8 @@ fn json_identity_of_a_worktree() {
     let runs = [
         e.forest(&["path", "app:feat/x", "--json"]),
         e.forest(&["path", "app:feat-x", "--json"]),
-        e.forest_in(&e.root.join("app/main"), &["path", "feat/x", "--json"]),
-        e.forest_in(&e.root.join("app"), &["path", "feat-x", "--json"]),
+        e.forest_in(&e.root.join("app/main"), &["path", ":feat/x", "--json"]),
+        e.forest_in(&e.root.join("app"), &["path", ":feat-x", "--json"]),
         e.forest_in(&x, &["path", "--json"]),
         e.forest_in(&deep, &["path", "--json"]),
     ];
@@ -676,7 +759,7 @@ fn json_identity_of_a_forest() {
     let wf = e.root.join("_forests/shop");
     let want = identity("forest", "shop", "shop", "feat/y".into(), &wf);
 
-    let r = e.forest(&["new", "shop", "api", "web", "--branch", "feat/y", "--json"]);
+    let r = e.forest(&["new", "feat/y", "api", "web", "--name", "shop", "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
     let j = r.json();
     assert_eq!(identity_of(&j), want);

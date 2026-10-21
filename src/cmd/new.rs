@@ -1,9 +1,9 @@
 //! `new`: create a worktree, or a forest with one worktree per project.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::Output;
 use crate::cmd::path::Identity;
@@ -15,31 +15,70 @@ use crate::project::{
     ref_exists, worktree_add,
 };
 
+/// Where a new worktree's branch came from.
+enum Start {
+    /// An existing local branch.
+    Local,
+    /// Created to track this remote branch.
+    Remote(String),
+    /// Created from this ref.
+    New(String),
+}
+
+impl Start {
+    fn created(&self) -> bool {
+        !matches!(self, Start::Local)
+    }
+
+    fn from(&self) -> Option<&str> {
+        match self {
+            Start::Local => None,
+            Start::Remote(r) | Start::New(r) => Some(r),
+        }
+    }
+
+    fn report(&self, project: &str, branch: &str) {
+        match self {
+            Start::Local => eprintln!("{project}: checked out branch {branch}"),
+            Start::Remote(r) => eprintln!("{project}: created branch {branch} tracking {r}"),
+            Start::New(r) => eprintln!("{project}: created branch {branch} from {r}"),
+        }
+    }
+
+    fn json(&self, project: &str, path: &Path) -> Value {
+        json!({
+            "project": project,
+            "path": path,
+            "branch_created": self.created(),
+            "from": self.from(),
+        })
+    }
+}
+
+/// With `projects`, `target` is the forest's branch; else it is `<project>:<branch>`
+/// or `:<branch>`.
 pub fn new(
     layout: &Layout,
     target: &str,
     projects: &[String],
-    branch: Option<&str>,
+    name: Option<&str>,
     from: Option<&str>,
 ) -> Result<Output> {
     if !projects.is_empty() {
-        return new_forest(layout, target, projects, branch.unwrap_or(target), from);
+        check_branch_name(target)?;
+        let name = name.map_or_else(|| slug(target), str::to_string);
+        return new_forest(layout, &name, projects, target, from);
     }
-    if branch.is_some() {
+    if name.is_some() {
         return Err(fail!(
-            "--branch is for forests: forest new <name> <project>... --branch <branch>"
+            "--name is for forests: forest new <branch> <project>... --name <forest>"
         ));
     }
-    let (project, branch) = match layout.split_target(target)? {
-        Some(t) => t,
-        None => match layout.context_project() {
-            Some(p) => (p, target.to_string()),
-            None => {
-                return Err(fail!(
-                    "'{target}' needs projects to be a forest, or <project>:<branch> to be a worktree"
-                ));
-            }
-        },
+    let Some((project, branch)) = layout.split_target(target)? else {
+        return Err(fail!(
+            "'{target}' needs projects to make a forest (forest new {target} <project>...), \
+             or <project>:{target} or :{target} to make a worktree"
+        ));
     };
     new_worktree(layout, &project, &branch, from)
 }
@@ -53,8 +92,8 @@ fn new_worktree(
     check_project(layout, project)?;
     let dir = slug(branch);
     let path = layout.project_dir(project).join(&dir);
-    create_worktree(layout, project, branch, &path, from, false)?;
-    eprintln!("{project}: created {branch}");
+    let start = create_worktree(layout, project, branch, &path, from)?;
+    start.report(project, branch);
     Ok(Output::new(
         format!("{}\n", path.display()),
         Identity {
@@ -63,8 +102,9 @@ fn new_worktree(
             dir,
             branch: Some(branch.to_string()),
             path: path.clone(),
+            forest: None,
         }
-        .with(json!({"worktrees": [{"project": project, "path": path}]})),
+        .with(json!({"worktrees": [start.json(project, &path)]})),
     ))
 }
 
@@ -80,14 +120,13 @@ fn new_forest(
     valid_forest_name(name)?;
     if layout.is_project(name) {
         return Err(fail!(
-            "a project named '{name}' exists; a forest can't share its name"
+            "a project named '{name}' exists; a forest can't share its name (use --name)"
         ));
     }
     let dir = layout.forest_dir(name);
     if dir.exists() {
         return Err(fail!("forest '{name}' already exists at {}", dir.display()));
     }
-    check_branch_name(branch)?;
     let mut unique: Vec<&String> = Vec::new();
     for p in projects {
         check_project(layout, p)?;
@@ -97,16 +136,16 @@ fn new_forest(
     }
 
     fs::create_dir_all(&dir)?;
-    let mut made: Vec<(&str, std::path::PathBuf, bool)> = Vec::new();
+    let mut made: Vec<(&str, PathBuf, Start)> = Vec::new();
     for p in &unique {
         let path = dir.join(p);
-        match create_worktree(layout, p, branch, &path, from, true) {
-            Ok(branch_created) => {
-                eprintln!("{p}: created {branch}");
-                made.push((p, path, branch_created));
+        match create_worktree(layout, p, branch, &path, from) {
+            Ok(start) => {
+                start.report(p, branch);
+                made.push((p, path, start));
             }
             Err(e) => {
-                for (p, path, branch_created) in made.iter().rev() {
+                for (p, path, start) in made.iter().rev() {
                     let bare = layout.bare(p);
                     let _ = git(
                         &bare,
@@ -117,7 +156,7 @@ fn new_forest(
                             path.as_os_str(),
                         ],
                     );
-                    if *branch_created {
+                    if start.created() {
                         let _ = git(&bare, ["branch", "-D", branch]);
                     }
                 }
@@ -128,7 +167,7 @@ fn new_forest(
     }
     let worktrees: Vec<_> = made
         .iter()
-        .map(|(p, path, _)| json!({"project": p, "path": path}))
+        .map(|(p, path, start)| start.json(p, path))
         .collect();
     Ok(Output::new(
         format!("{}\n", dir.display()),
@@ -145,17 +184,15 @@ fn check_project(layout: &Layout, project: &str) -> Result<()> {
     }
 }
 
-/// Makes `path` a new worktree of `project` on `branch`; returns whether the branch
-/// was created. With `from_fallback`, a `from` that doesn't exist in this project
-/// falls back to the default branch.
+/// Makes `path` a new worktree of `project` on `branch`. `from` is only for a new
+/// branch, and must exist.
 fn create_worktree(
     layout: &Layout,
     project: &str,
     branch: &str,
     path: &Path,
     from: Option<&str>,
-    from_fallback: bool,
-) -> Result<bool> {
+) -> Result<Start> {
     check_branch_name(branch)?;
     let bare = layout.bare(project);
     // Pruned first, so a deleted worktree can be made again.
@@ -176,22 +213,47 @@ fn create_worktree(
     if origin_url(&bare).is_some() {
         fetch(&bare)?;
     }
-    let remote = format!("refs/remotes/origin/{branch}");
-    if ref_exists(&bare, &format!("refs/heads/{branch}")) {
-        worktree_add(&bare, &[], path, &[branch])?;
-        return Ok(false);
-    }
-    if ref_exists(&bare, &remote) {
-        worktree_add(&bare, &["--track", "-b", branch], path, &[&remote])?;
+    let remote = format!("origin/{branch}");
+    let exists = if ref_exists(&bare, &format!("refs/heads/{branch}")) {
+        Some(Start::Local)
+    } else if ref_exists(&bare, &format!("refs/remotes/{remote}")) {
+        Some(Start::Remote(remote))
     } else {
-        let base = match from {
-            Some(f) if commit_exists(&bare, f) => f.to_string(),
-            Some(f) if !from_fallback => return Err(fail!("ref '{f}' not found in {project}")),
-            _ => default_base(&bare, project)?,
-        };
-        worktree_add(&bare, &["--no-track", "-b", branch], path, &[&base])?;
+        None
+    };
+    if let Some(start) = exists {
+        if from.is_some() {
+            let place = match start {
+                Start::Remote(_) => "on origin",
+                _ => "locally",
+            };
+            return Err(fail!(
+                "branch '{branch}' already exists {place}; --from is only for a new branch"
+            ));
+        }
+        match &start {
+            Start::Remote(r) => {
+                let r = format!("refs/remotes/{r}");
+                worktree_add(&bare, &["--track", "-b", branch], path, &[&r])?
+            }
+            _ => worktree_add(&bare, &[], path, &[branch])?,
+        }
+        return Ok(start);
     }
-    Ok(true)
+    let base = match from {
+        Some(f) if commit_exists(&bare, f) => f.to_string(),
+        Some(f) => return Err(fail!("ref '{f}' not found in {project}")),
+        None => default_base(&bare, project)?,
+    };
+    worktree_add(&bare, &["--no-track", "-b", branch], path, &[&base])?;
+    Ok(Start::New(short_ref(&base).to_string()))
+}
+
+/// `origin/main` for `refs/remotes/origin/main`, `main` for `refs/heads/main`.
+fn short_ref(r: &str) -> &str {
+    r.strip_prefix("refs/remotes/")
+        .or_else(|| r.strip_prefix("refs/heads/"))
+        .unwrap_or(r)
 }
 
 /// The default branch to start new branches from: `origin/<default>` when it exists

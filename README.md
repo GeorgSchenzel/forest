@@ -13,21 +13,21 @@ Work on many branches at once, in one repo or across several, without thinking a
 
 ## Forests
 
-A forest is a folder with the same branch checked out in several repos, for a change that spans them, for example a backend and its frontend. You make one when you need it, with a name of your choice:
+A forest is a folder with the same branch checked out in several repos, for a change that spans them, for example a backend and its frontend. You make one when you need it:
 
 ```sh
-forest new tuna-auth backend frontend --branch feat/auth
+forest new feat/auth backend frontend
 ```
 
 This creates branch `feat/auth` in both repos and puts them side by side in one folder:
 
 ```
-_forests/tuna-auth/
+_forests/feat-auth/
   backend/     # on feat/auth
   frontend/    # on feat/auth
 ```
 
-Without `--branch`, the branch is the forest's name. You work in that folder as one workspace: open it in your editor, run both services, make one change across both repos. Each repo still commits and pushes on its own, as usual. When the feature is done, `forest rm tuna-auth` removes the whole thing.
+The forest is named after the branch, like a worktree folder; `--name` picks another name. You work in that folder as one workspace: open it in your editor, run both services, make one change across both repos. Each repo still commits and pushes on its own, as usual. When the feature is done, `forest rm feat-auth` removes the whole thing.
 
 Nothing is defined up front, and nothing is stored besides the folder: a forest's repos are the worktrees in it.
 
@@ -43,7 +43,7 @@ All repos live under one root (`~/projects`, or `$FOREST_ROOT`):
   frontend/
     main/
   _forests/
-    tuna-auth/
+    feat-auth/
       backend/
       frontend/
 ```
@@ -59,22 +59,22 @@ forest clone git@github.com:me/frontend.git
 forest new backend:feat/x                    # one repo
 cd "$(forest path backend:feat/x)"
 
-forest new tuna-auth backend frontend --branch feat/auth   # same branch in several repos
-cd "$(forest path tuna-auth)"
+forest new feat/auth backend frontend        # same branch in several repos
+cd "$(forest path feat-auth)"
 
 forest ls                                    # everything, with dirty / ahead / behind
-forest rm tuna-auth --delete-branch          # clean up worktrees and branches
+forest rm feat-auth --delete-branch          # clean up worktrees and branches
 ```
 
-You address a worktree as `<project>:<branch>` and a forest by its name. Inside a project folder, the branch name alone is enough; a word that isn't a branch there means the forest. `path` and `rm` with no argument act on the worktree or forest you are in.
+You address a worktree as `<project>:<branch>`, wherever it is, also inside a forest. Inside a project folder, `:<branch>` is enough. A word without `:` is always a forest. `path` and `rm` with no argument act on the worktree or forest you are in.
 
 | Command | Purpose |
 |---|---|
 | `init <name> [--branch <b>]` | New project with no remote |
 | `clone <url> [name]` | New project from a remote, or from a local repo |
 | `migrate <path> [name]` | Move an existing clone or bare repo into the layout |
-| `new <project>:<branch> [--from <ref>]` | Create a worktree |
-| `new <forest> <projects…> [--branch <b>] [--from <ref>]` | Create a forest with one worktree per project |
+| `new <project>:<branch> [--from <ref>]` | Create a worktree (or `new :<branch>` inside a project) |
+| `new <branch> <projects…> [--name <forest>] [--from <ref>]` | Create a forest with one worktree per project |
 | `ls [name]` | List projects and forests with their worktrees and status |
 | `path [target]` | Print the absolute path |
 | `rm [target] [--force] [--delete-branch]` | Remove worktrees, and optionally their branches |
@@ -85,18 +85,19 @@ Global flags: `--json` (versioned output for scripts) and `--root <path>`.
 With `--json`, `path`, `new` and `rm` describe their target the same way however it was given:
 
 ```json
-{"v":1,"kind":"forest","name":"tuna-auth","dir":"tuna-auth","branch":"feat/auth","path":"/Users/me/projects/_forests/tuna-auth"}
+{"v":1,"kind":"forest","name":"feat-auth","dir":"feat-auth","branch":"feat/auth","path":"/Users/me/projects/_forests/feat-auth","forest":null}
 ```
 
-`kind` is `worktree` or `forest`, `name` is the project or forest, and (`name`, `dir`) is unique. `branch` is `null` for a detached worktree, or a forest with no worktree on a branch.
+`kind` is `worktree` or `forest`, `name` is the project or forest, and `forest` is the forest a worktree belongs to (else `null`). (`kind`, `name`, `forest`, `dir`) is unique. `branch` is `null` for a detached worktree, or a forest with no worktree on a branch.
 
 ## Good to know
 
 - Branch folders are flat, so `feat/x` becomes `feat-x`. `ls` shows the real branch name.
 - `new` only creates. It fails if the worktree or forest already exists, and a forest is all or nothing: if one repo fails, the worktrees and branches it made are removed again.
-- `new` uses an existing local branch, else the remote branch (with tracking), else creates a new branch from `--from` or the default branch. In a forest, a `--from` ref missing in one repo falls back to that repo's default branch.
+- `new` uses an existing local branch, else the remote branch (with tracking), else creates a new branch from `--from` or the default branch. It says which on stderr, and as `branch_created` and `from` with `--json`. `--from` is only for a new branch, and must exist in every repo.
 - A forest can't share its name with a project.
 - Git allows a branch to be checked out in only one worktree. This means a forest can't check out `main`, because each project's `main/` folder already holds it.
+- `rm <project>:<branch>` on a forest's worktree removes only that one; the forest goes with its last worktree.
 - `rm` never loses commits. It refuses if there are uncommitted changes or if you target a default-branch worktree. `--delete-branch` only deletes a branch that is merged, pushed, or whose upstream is gone.
 - `migrate` moves the working tree instead of checking it out again, so staged, untracked and ignored files survive. Other worktrees are moved to their branch folders. It refuses a detached HEAD or an operation in progress, and a repo outside the root must be on the same filesystem.
 - Exit codes: `0` ok, `1` error, `2` refused by a safety check.
