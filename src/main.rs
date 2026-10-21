@@ -79,6 +79,8 @@ Examples:
         target: Option<String>,
     },
     /// Print the absolute path of a forest or worktree
+    ///
+    /// A forest with only one worktree prints that worktree.
     #[command(after_help = TARGETS)]
     Path {
         target: Option<String>,

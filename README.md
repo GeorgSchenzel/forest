@@ -56,7 +56,7 @@ forest clone git@github.com:me/backend.git   # or: forest init <name> for a new 
 forest clone git@github.com:me/frontend.git
 
 forest new feat/x backend                    # one repo
-cd "$(forest path feat/x)"
+cd "$(forest path feat/x)"                   # into forests/feat-x/backend
 
 forest new feat/auth backend frontend        # the same branch in several repos
 
@@ -64,6 +64,8 @@ forest ls                                    # everything, with dirty / ahead / 
 forest rm feat/auth --delete-branch          # clean up worktrees and branches
 forest clean                                 # remove every forest that is done
 ```
+
+`path` of a forest with only one repo is that repo's worktree, so you land where git is.
 
 A target is a forest, by its name or its branch, or a repo, which means its own checkout. A repo after it picks one worktree: `forest path feat/auth backend`, or `forest path main backend` for the repo's checkout. Names match exactly, and a word that names two things is an error, never a guess. `path` and `rm` with no argument act on the forest or repo you are in.
 

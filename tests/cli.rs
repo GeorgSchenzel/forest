@@ -422,6 +422,35 @@ fn targets() {
 }
 
 #[test]
+fn path_steps_into_the_only_worktree() {
+    let e = Env::new();
+    e.project("api");
+    e.project("web");
+    let wt = PathBuf::from(e.ok(&["new", "feat/x", "api"])).join("api");
+    let s = |p: &Path| p.to_str().unwrap().to_string();
+    assert_eq!(e.ok(&["path", "feat/x"]), s(&wt));
+    assert_eq!(e.ok(&["path", "feat-x"]), s(&wt));
+    assert_eq!(e.forest_in(&wt, &["path"]).stdout.trim(), s(&wt));
+    let j = e.forest(&["path", "feat/x", "--json"]).json();
+    let want = identity(
+        "worktree",
+        "feat-x".into(),
+        "api".into(),
+        "feat/x".into(),
+        &wt,
+    );
+    assert_eq!(j, want);
+
+    // With a second repo, the forest is the forest again.
+    e.ok(&["new", "feat/x", "web"]);
+    assert_eq!(e.ok(&["path", "feat/x"]), s(&forest_dir(&e, "feat-x")));
+    // And `rm` still means the whole forest.
+    e.ok(&["rm", "feat/x", "web"]);
+    e.ok(&["rm", "feat/x"]);
+    assert!(!forest_dir(&e, "feat-x").exists());
+}
+
+#[test]
 fn rm_refuses_dirty_worktrees() {
     let e = Env::new();
     e.project("app");
@@ -860,7 +889,15 @@ fn json_identity_of_a_forest_without_a_branch() {
             "main",
         ],
     );
-    assert_eq!(e.forest_in(&member, &["path", "--json"]).json(), want);
+    // `path` steps into the only worktree, which has no branch either.
+    let wt = identity(
+        "worktree",
+        "shop".into(),
+        "api".into(),
+        Value::Null,
+        &member,
+    );
+    assert_eq!(e.forest_in(&member, &["path", "--json"]).json(), wt);
     let ls = e.forest(&["ls", "shop", "--json"]).json();
     assert_eq!(ls["forests"][0]["branch"], Value::Null);
     assert_eq!(ls["forests"][0]["projects"][0], "api");

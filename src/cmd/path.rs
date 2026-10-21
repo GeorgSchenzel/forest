@@ -87,12 +87,30 @@ impl Located {
     }
 }
 
+/// A forest with only one worktree means that worktree, so `cd` lands in the repo.
 pub fn path(layout: &Layout, target: Option<&str>, project: Option<&str>) -> Result<Output> {
-    let located = locate(layout, target, project)?;
+    let located = step_in(layout, locate(layout, target, project)?)?;
     Ok(Output::new(
         format!("{}\n", located.path().display()),
         located.identity(layout)?.with(json!({})),
     ))
+}
+
+/// The forest's worktree when it has exactly one, else the forest itself.
+fn step_in(layout: &Layout, located: Located) -> Result<Located> {
+    let Located::Forest { name, .. } = &located else {
+        return Ok(located);
+    };
+    let mut members = members(layout, name)?;
+    if members.len() != 1 {
+        return Ok(located);
+    }
+    let (project, worktree) = members.remove(0);
+    Ok(Located::Worktree {
+        project,
+        worktree,
+        forest: Some(name.clone()),
+    })
 }
 
 /// The branch of a forest's first worktree on one, in repo order.
