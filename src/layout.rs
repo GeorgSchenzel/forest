@@ -1,16 +1,17 @@
 //! The fixed on-disk layout: root, projects, forests, names, targets and cwd context.
+//!
+//! A project is `<root>/<name>/` with a bare repo in `.bare`. A forest is any dir
+//! `<root>/_forests/<name>/`; its members are the worktrees in it, so nothing else is
+//! stored.
 
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
 use crate::error::{Result, fail};
 
 pub const FORESTS: &str = "_forests";
 pub const BARE: &str = ".bare";
-pub const FOREST_TOML: &str = ".forest.toml";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Name {
@@ -19,25 +20,14 @@ pub enum Name {
 }
 
 /// Where cwd is: a project or forest, plus the first path component below it
-/// (a worktree dir or workforest dir), if any.
+/// (a worktree dir, or a forest's member), if any.
 pub struct Context {
     pub name: Name,
     pub sub: Option<String>,
 }
 
-pub struct Target {
-    pub name: Name,
-    pub branch: String,
-}
-
 pub struct Layout {
     pub root: PathBuf,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ForestToml {
-    projects: Vec<String>,
 }
 
 impl Layout {
@@ -79,7 +69,7 @@ impl Layout {
     }
 
     pub fn is_forest(&self, name: &str) -> bool {
-        valid_forest_name(name).is_ok() && self.forest_dir(name).join(FOREST_TOML).is_file()
+        valid_forest_name(name).is_ok() && self.forest_dir(name).is_dir()
     }
 
     pub fn projects(&self) -> Result<Vec<String>> {
@@ -104,25 +94,6 @@ impl Layout {
         }
         names.sort();
         Ok(names)
-    }
-
-    pub fn forest_projects(&self, forest: &str) -> Result<Vec<String>> {
-        let path = self.forest_dir(forest).join(FOREST_TOML);
-        let text = fs::read_to_string(&path)?;
-        let parsed: ForestToml =
-            toml::from_str(&text).map_err(|e| fail!("invalid {}: {e}", path.display()))?;
-        Ok(parsed.projects)
-    }
-
-    pub fn write_forest_projects(&self, forest: &str, projects: &[String]) -> Result<PathBuf> {
-        let dir = self.forest_dir(forest);
-        fs::create_dir_all(&dir)?;
-        let toml = ForestToml {
-            projects: projects.to_vec(),
-        };
-        let text = toml::to_string(&toml).map_err(|e| fail!("cannot write {forest}: {e}"))?;
-        fs::write(dir.join(FOREST_TOML), text)?;
-        Ok(dir)
     }
 
     /// Resolves a project or forest name; a name that is both is an error.
@@ -165,24 +136,29 @@ impl Layout {
         })
     }
 
-    /// Parses `<name>:<branch>`, or a bare branch in the cwd context.
-    pub fn parse_target(&self, s: &str) -> Result<Target> {
-        if let Some((name, branch)) = s.split_once(':') {
-            if name.is_empty() || branch.is_empty() {
-                return Err(fail!("invalid target '{s}': expected <name>:<branch>"));
-            }
-            return Ok(Target {
-                name: self.resolve_name(name)?,
-                branch: branch.to_string(),
-            });
+    /// Splits `<project>:<branch>`; `None` for a word without `:`.
+    pub fn split_target(&self, s: &str) -> Result<Option<(String, String)>> {
+        let Some((project, branch)) = s.split_once(':') else {
+            return Ok(None);
+        };
+        if project.is_empty() || branch.is_empty() {
+            return Err(fail!("invalid target '{s}': expected <project>:<branch>"));
         }
-        let ctx = self.context().ok_or_else(|| {
-            fail!("not inside a project or forest; use <name>:<branch> instead of '{s}'")
-        })?;
-        Ok(Target {
-            name: ctx.name,
-            branch: s.to_string(),
-        })
+        if !self.is_project(project) {
+            return Err(fail!(
+                "no project named '{project}' in {}",
+                self.root.display()
+            ));
+        }
+        Ok(Some((project.to_string(), branch.to_string())))
+    }
+
+    /// The project cwd is in, if any.
+    pub fn context_project(&self) -> Option<String> {
+        match self.context()?.name {
+            Name::Project(p) => Some(p),
+            Name::Forest(_) => None,
+        }
     }
 }
 

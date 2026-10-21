@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 use crate::error::Result;
 use crate::layout::Layout;
 
-/// Worktree & workforest manager.
+/// Worktree & forest manager.
 #[derive(Parser)]
 #[command(name = "forest", version)]
 struct Cli {
@@ -46,40 +46,32 @@ enum Command {
         /// Project name (default: the directory's name, without `.git`)
         name: Option<String>,
     },
-    /// Create a forest, or change its project list
-    Define {
-        /// Forest name
-        name: String,
+    /// Create a worktree, or a forest of worktrees across projects
+    New {
+        /// <project>:<branch> (or a branch in the current project); with projects, the forest's name
+        target: String,
         /// Projects of a new forest
         projects: Vec<String>,
-        /// Add projects to an existing forest
-        #[arg(long, value_name = "PROJECT", num_args = 1..)]
-        add: Vec<String>,
-        /// Remove projects from an existing forest
-        #[arg(long, value_name = "PROJECT", num_args = 1..)]
-        remove: Vec<String>,
-    },
-    /// Create a worktree (project) or workforest (forest)
-    New {
-        /// <name>:<branch>, or a branch in the current project/forest
-        target: String,
+        /// The forest's branch (default: its name)
+        #[arg(long, value_name = "BRANCH")]
+        branch: Option<String>,
         /// Start a new branch from this ref instead of the default branch
         #[arg(long, value_name = "REF")]
         from: Option<String>,
     },
-    /// List projects, forests, worktrees and workforests
+    /// List projects and forests with their worktrees
     Ls {
         /// A project or forest
         name: Option<String>,
     },
-    /// Print the absolute path of a worktree or workforest
+    /// Print the absolute path of a worktree or forest
     Path {
-        /// <name>:<branch>, a branch in the current context, or cwd's worktree/workforest
+        /// <project>:<branch>, a forest, a branch in the current project, or cwd's worktree/forest
         target: Option<String>,
     },
-    /// Remove a worktree or workforest
+    /// Remove a worktree or forest
     Rm {
-        /// <name>:<branch>, a branch in the current context, or cwd's worktree/workforest
+        /// <project>:<branch>, a forest, a branch in the current project, or cwd's worktree/forest
         target: Option<String>,
         /// Override the safety checks
         #[arg(long)]
@@ -118,13 +110,18 @@ fn run(cli: Cli) -> Result<Output> {
         Command::Init { name, branch } => cmd::setup::init(&layout, &name, branch.as_deref()),
         Command::Clone { url, name } => cmd::setup::clone(&layout, &url, name.as_deref()),
         Command::Migrate { path, name } => cmd::migrate::migrate(&layout, &path, name.as_deref()),
-        Command::Define {
-            name,
+        Command::New {
+            target,
             projects,
-            add,
-            remove,
-        } => cmd::define::define(&layout, &name, &projects, &add, &remove),
-        Command::New { target, from } => cmd::new::new(&layout, &target, from.as_deref()),
+            branch,
+            from,
+        } => cmd::new::new(
+            &layout,
+            &target,
+            &projects,
+            branch.as_deref(),
+            from.as_deref(),
+        ),
         Command::Ls { name } => cmd::ls::ls(&layout, name.as_deref()),
         Command::Path { target } => cmd::path::path(&layout, target.as_deref()),
         Command::Rm {

@@ -96,12 +96,6 @@ impl Env {
         dir
     }
 
-    fn forest_toml(&self, name: &str, projects: &str) {
-        let dir = self.root.join("_forests").join(name);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join(".forest.toml"), format!("projects = {projects}\n")).unwrap();
-    }
-
     /// `init` + first commit, so branches can be made.
     fn project(&self, name: &str) -> PathBuf {
         let wt = PathBuf::from(self.ok(&["init", name]));
@@ -132,7 +126,7 @@ fn init_rejects_bad_names() {
     let e = Env::new();
     assert_eq!(e.forest(&["init", "_x"]).code, 1);
     assert_eq!(e.forest(&["init", ".x"]).code, 1);
-    e.forest_toml("shop", "[]");
+    fs::create_dir_all(e.root.join("_forests/shop")).unwrap();
     assert_eq!(e.forest(&["init", "shop"]).code, 1);
     e.ok(&["init", "app"]);
     assert_eq!(e.forest(&["init", "app"]).code, 1);
@@ -219,12 +213,13 @@ fn new_resolves_local_remote_and_new_branches() {
 }
 
 #[test]
-fn new_is_idempotent_and_addresses_by_dir_name() {
+fn new_only_creates() {
     let e = Env::new();
     e.project("app");
     let a = e.ok(&["new", "app:feat/x"]);
-    assert_eq!(e.ok(&["new", "app:feat/x"]), a);
-    assert_eq!(e.ok(&["new", "app:feat-x"]), a);
+    let r = e.forest(&["new", "app:feat/x"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("already exists"), "{}", r.stderr);
     assert_eq!(e.ok(&["path", "app:feat-x"]), a);
     assert_eq!(e.ok(&["path", "app:feat/x"]), a);
 }
@@ -236,12 +231,12 @@ fn new_rejects_dir_collision_and_double_checkout() {
     e.ok(&["new", "app:feat-x"]);
     let r = e.forest(&["new", "app:feat/x"]);
     assert_eq!(r.code, 1);
-    assert!(r.stderr.contains("collides"), "{}", r.stderr);
+    assert!(r.stderr.contains("already exists"), "{}", r.stderr);
 
-    e.forest_toml("shop", r#"["app"]"#);
-    let r = e.forest(&["new", "shop:main"]);
+    let r = e.forest(&["new", "shop", "app", "--branch", "main"]);
     assert_eq!(r.code, 1);
     assert!(r.stderr.contains("already checked out at"), "{}", r.stderr);
+    assert!(!e.root.join("_forests/shop").exists());
 }
 
 #[test]
@@ -263,53 +258,80 @@ fn cwd_context() {
 
     let r = e.forest_in(&e.base, &["path", "feat/x"]);
     assert_eq!(r.code, 1);
-    assert!(r.stderr.contains("<name>:<branch>"), "{}", r.stderr);
+    let r = e.forest_in(&e.base, &["new", "feat/y"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("<project>:<branch>"), "{}", r.stderr);
+
+    // In a project, a bare word is a branch there first, else a forest.
+    e.ok(&["new", "app:both"]);
+    e.ok(&["new", "both", "app", "--branch", "feat/b"]);
+    let r = e.forest_in(&sub, &["path", "both"]);
+    assert_eq!(r.stdout.trim(), e.root.join("app/both").to_str().unwrap());
+    assert_eq!(
+        e.ok(&["path", "both"]),
+        e.root.join("_forests/both").to_str().unwrap()
+    );
+    e.ok(&["new", "spike", "app"]);
+    let r = e.forest_in(&sub, &["path", "spike"]);
+    assert_eq!(
+        r.stdout.trim(),
+        e.root.join("_forests/spike").to_str().unwrap()
+    );
 }
 
 #[test]
-fn workforest_fills_gaps_and_reports_partial_failure() {
+fn forest_new_is_all_or_nothing() {
     let e = Env::new();
     e.project("api");
     e.project("web");
     e.ok(&["init", "empty"]); // unborn: can't branch
-    e.forest_toml("shop", r#"["api", "web", "empty"]"#);
+    let api_bare = e.root.join("api/.bare");
+    e.git(&api_bare, &["branch", "feat/old", "main"]);
 
-    let r = e.forest(&["new", "shop:feat/y", "--json"]);
+    // One project fails: the others are rolled back, but an existing branch stays.
+    let r = e.forest(&["new", "shop", "web", "api", "empty", "--branch", "feat/old"]);
     assert_eq!(r.code, 1);
-    let j = r.json();
-    let wf = e.root.join("_forests/shop/feat-y");
-    assert_eq!(j["path"], wf.to_str().unwrap());
-    let statuses: Vec<_> = j["worktrees"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|w| w["status"].as_str().unwrap().to_string())
-        .collect();
-    assert_eq!(statuses, ["created", "created", "failed"]);
-    assert!(wf.join("api/.git").exists());
+    assert!(r.stderr.contains("nothing was created"), "{}", r.stderr);
+    assert!(!e.root.join("_forests/shop").exists());
+    assert!(
+        e.git(&e.root.join("web/.bare"), &["branch", "--list", "feat/old"])
+            .is_empty()
+    );
+    assert!(
+        !e.git(&api_bare, &["branch", "--list", "feat/old"])
+            .is_empty()
+    );
+    assert!(!e.git(&api_bare, &["worktree", "list"]).contains("_forests"));
 
-    // Fix the failing project and re-run, addressed by dir name: fills the gap
-    // with the workforest's real branch.
-    e.commit(&e.root.join("empty/main"), "first");
-    let r = e.forest(&["new", "shop:feat-y", "--json"]);
+    // The branch defaults to the forest's name.
+    let wf = e.root.join("_forests/shop");
+    let r = e.forest(&["new", "shop", "api", "web", "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
     let j = r.json();
-    assert_eq!(j["branch"], "feat/y");
-    assert_eq!(j["worktrees"][0]["status"], "exists");
-    assert_eq!(j["worktrees"][2]["status"], "created");
+    assert_eq!(j["path"], wf.to_str().unwrap());
+    assert_eq!(j["branch"], "shop");
+    assert_eq!(j["worktrees"].as_array().unwrap().len(), 2);
     assert_eq!(
-        e.git(&wf.join("empty"), &["branch", "--show-current"]),
-        "feat/y"
+        e.git(&wf.join("web"), &["branch", "--show-current"]),
+        "shop"
     );
 
-    // Inside a workforest, path means the whole workforest.
+    // An existing forest is never changed by new.
+    let r = e.forest(&["new", "shop", "empty"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("already exists"), "{}", r.stderr);
+    assert!(!wf.join("empty").exists());
+
+    // Inside a forest, path means the whole forest.
     let r = e.forest_in(&wf.join("web"), &["path"]);
     assert_eq!(r.stdout.trim(), wf.to_str().unwrap());
 
     // --from is used where it exists, else the default branch.
     e.commit(&wf.join("api"), "api work");
-    e.ok(&["new", "shop:feat/z", "--from", "feat/y"]);
-    let z = e.root.join("_forests/shop/feat-z");
+    e.ok(&[
+        "new", "z", "api", "web", "--from", "shop", "--branch", "feat/z",
+    ]);
+    let z = e.root.join("_forests/z");
     assert_eq!(
         e.git(&z.join("api"), &["log", "-1", "--format=%s"]),
         "api work"
@@ -328,16 +350,22 @@ fn workforest_fills_gaps_and_reports_partial_failure() {
         .collect();
     assert!(forests.contains(&Value::from("shop")));
     assert!(forests.contains(&Value::Null));
+    let out = e.ok(&["ls", "z"]);
+    assert!(out.starts_with("z  feat/z\n  api "), "{out}");
 }
 
 #[test]
-fn name_that_is_both_project_and_forest_is_an_error() {
+fn forest_names_are_checked() {
     let e = Env::new();
     e.project("app");
-    e.forest_toml("app", r#"["app"]"#);
-    let r = e.forest(&["new", "app:x"]);
+    let r = e.forest(&["new", "app", "app"]);
     assert_eq!(r.code, 1);
-    assert!(r.stderr.contains("both"), "{}", r.stderr);
+    assert!(r.stderr.contains("can't share its name"), "{}", r.stderr);
+    assert_eq!(e.forest(&["new", "a:b", "app"]).code, 1);
+    assert_eq!(e.forest(&["new", "x", "nope"]).code, 1);
+    assert_eq!(e.forest(&["new", "app:x", "--branch", "y"]).code, 1);
+    e.ok(&["new", "shop", "app", "--branch", "feat/s"]);
+    assert_eq!(e.forest(&["init", "shop"]).code, 1);
 }
 
 #[test]
@@ -414,12 +442,11 @@ fn rm_delete_branch_safety() {
 }
 
 #[test]
-fn workforest_rm_is_all_or_nothing() {
+fn forest_rm_is_all_or_nothing() {
     let e = Env::new();
     e.project("api");
     e.project("web");
-    e.forest_toml("shop", r#"["api", "web"]"#);
-    let wf = PathBuf::from(e.ok(&["new", "shop:feat/y"]));
+    let wf = PathBuf::from(e.ok(&["new", "shop", "api", "web"]));
     fs::write(wf.join("web/dirty"), "x").unwrap();
 
     let r = e.forest_in(&wf.join("api"), &["rm"]);
@@ -462,52 +489,6 @@ fn ls_human_and_usage_errors() {
 }
 
 #[test]
-fn define_creates_and_edits_forests() {
-    let e = Env::new();
-    e.project("api");
-    e.project("web");
-    e.project("docs");
-    let toml = e.root.join("_forests/shop/.forest.toml");
-
-    // Creating needs projects that exist, and a name no project uses.
-    assert_eq!(e.forest(&["define", "shop"]).code, 1);
-    assert_eq!(e.forest(&["define", "shop", "api", "nope"]).code, 1);
-    assert_eq!(e.forest(&["define", "api", "web"]).code, 1);
-    assert_eq!(e.forest(&["define", "shop", "--add", "api"]).code, 1);
-    assert!(!toml.exists());
-
-    assert_eq!(
-        e.ok(&["define", "shop", "api", "web", "api"]),
-        "shop  [api, web]"
-    );
-    assert_eq!(
-        fs::read_to_string(&toml).unwrap(),
-        "projects = [\"api\", \"web\"]\n"
-    );
-    e.ok(&["new", "shop:feat/y"]);
-
-    // An existing forest only changes through --add/--remove.
-    assert_eq!(e.forest(&["define", "shop", "docs"]).code, 1);
-    assert_eq!(e.forest(&["define", "shop", "--remove", "docs"]).code, 1);
-    let j = e
-        .forest(&[
-            "define", "shop", "--add", "docs", "--remove", "web", "--json",
-        ])
-        .json();
-    assert_eq!(j["projects"], serde_json::json!(["api", "docs"]));
-    assert_eq!(j["created"], false);
-    assert_eq!(
-        e.forest(&["define", "shop", "--remove", "api", "docs"])
-            .code,
-        1
-    );
-
-    // Re-running new fills in the added project.
-    let wf = PathBuf::from(e.ok(&["new", "shop:feat/y"]));
-    assert!(wf.join("docs/.git").exists());
-}
-
-#[test]
 fn new_recreates_a_deleted_worktree() {
     let e = Env::new();
     e.project("app");
@@ -515,26 +496,24 @@ fn new_recreates_a_deleted_worktree() {
     fs::remove_dir_all(&x).unwrap();
     let r = e.forest(&["new", "app:feat/x", "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
-    assert_eq!(r.json()["worktrees"][0]["status"], "created");
     assert!(x.join(".git").exists());
 }
 
 #[test]
-fn workforest_rm_finds_missing_members_and_keeps_strays() {
+fn forest_rm_finds_missing_members_and_keeps_strays() {
     let e = Env::new();
     e.project("api");
     e.project("web");
-    e.forest_toml("shop", r#"["api", "web"]"#);
-    let wf = PathBuf::from(e.ok(&["new", "shop:feat/y"]));
+    let wf = PathBuf::from(e.ok(&["new", "shop", "api", "web", "--branch", "feat/y"]));
     fs::remove_dir_all(wf.join("web")).unwrap();
     fs::create_dir_all(wf.join("notes")).unwrap();
     fs::write(wf.join("notes/todo"), "x").unwrap();
 
     // The stray dir refuses without --force.
-    assert_eq!(e.forest(&["rm", "shop:feat/y"]).code, 2);
+    assert_eq!(e.forest(&["rm", "shop"]).code, 2);
 
     // With --force, both worktrees go, but the stray dir is kept.
-    let r = e.forest(&["rm", "shop:feat/y", "--force", "--delete-branch", "--json"]);
+    let r = e.forest(&["rm", "shop", "--force", "--delete-branch", "--json"]);
     assert_eq!(r.code, 1, "{}", r.stderr);
     let j = r.json();
     assert_eq!(j["removed"].as_array().unwrap().len(), 2);
@@ -543,10 +522,10 @@ fn workforest_rm_finds_missing_members_and_keeps_strays() {
     assert!(!wf.join("api").exists());
     let web_bare = e.root.join("web/.bare");
     assert!(e.git(&web_bare, &["branch", "--list", "feat/y"]).is_empty());
-    assert!(!e.git(&web_bare, &["worktree", "list"]).contains("feat-y"));
+    assert!(!e.git(&web_bare, &["worktree", "list"]).contains("shop"));
 
-    // Nothing still holds the branch, so the workforest can be made again.
-    e.ok(&["new", "shop:feat/y"]);
+    // Nothing still holds the branch, so a forest on it can be made again.
+    e.ok(&["new", "shop2", "api", "web", "--branch", "feat/y"]);
 }
 
 #[test]
@@ -618,11 +597,10 @@ fn ls_survives_a_broken_worktree() {
 }
 
 #[test]
-fn prune_reports_workforest_without_worktrees() {
+fn prune_reports_forest_without_worktrees() {
     let e = Env::new();
     e.project("api");
-    e.forest_toml("shop", r#"["api"]"#);
-    let leftover = e.root.join("_forests/shop/feat-y");
+    let leftover = e.root.join("_forests/shop");
     fs::create_dir_all(&leftover).unwrap();
     fs::write(leftover.join(".envrc"), "x").unwrap();
     let j = e.forest(&["prune", "--json"]).json();
@@ -665,12 +643,6 @@ fn json_identity_of_a_worktree() {
     assert_eq!(r.code, 0, "{}", r.stderr);
     let j = r.json();
     assert_eq!(identity_of(&j), want);
-    assert_eq!(j["worktrees"][0]["status"], "created");
-    // Re-run by dir name: same identity, real branch.
-    assert_eq!(
-        identity_of(&e.forest(&["new", "app:feat-x", "--json"]).json()),
-        want
-    );
 
     let deep = x.join("deep");
     fs::create_dir_all(&deep).unwrap();
@@ -697,25 +669,22 @@ fn json_identity_of_a_worktree() {
 }
 
 #[test]
-fn json_identity_of_a_workforest() {
+fn json_identity_of_a_forest() {
     let e = Env::new();
     e.project("api");
     e.project("web");
-    e.forest_toml("shop", r#"["api", "web"]"#);
-    let wf = e.root.join("_forests/shop/feat-y");
-    let want = identity("workforest", "shop", "feat-y", "feat/y".into(), &wf);
+    let wf = e.root.join("_forests/shop");
+    let want = identity("forest", "shop", "shop", "feat/y".into(), &wf);
 
-    let r = e.forest(&["new", "shop:feat/y", "--json"]);
+    let r = e.forest(&["new", "shop", "api", "web", "--branch", "feat/y", "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
     let j = r.json();
     assert_eq!(identity_of(&j), want);
     assert_eq!(j["worktrees"].as_array().unwrap().len(), 2);
 
     let runs = [
-        e.forest(&["path", "shop:feat/y", "--json"]),
-        e.forest(&["path", "shop:feat-y", "--json"]),
-        e.forest_in(&e.root.join("_forests/shop"), &["path", "feat/y", "--json"]),
-        e.forest_in(&wf.join("api"), &["path", "feat-y", "--json"]),
+        e.forest(&["path", "shop", "--json"]),
+        e.forest_in(&e.root.join("api/main"), &["path", "shop", "--json"]),
         e.forest_in(&wf, &["path", "--json"]),
         e.forest_in(&wf.join("web"), &["path", "--json"]),
     ];
@@ -724,22 +693,22 @@ fn json_identity_of_a_workforest() {
         assert_eq!(r.json(), want, "{}", r.stdout);
     }
 
-    let r = e.forest(&["rm", "shop:feat/y", "--json"]);
+    let r = e.forest(&["rm", "shop", "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
     let j = r.json();
     assert_eq!(identity_of(&j), want);
     assert_eq!(j["removed"].as_array().unwrap().len(), 2);
+    assert!(!wf.exists());
 }
 
 #[test]
-fn json_identity_of_a_workforest_without_a_branch() {
+fn json_identity_of_a_forest_without_a_branch() {
     let e = Env::new();
     e.project("api");
-    e.forest_toml("shop", r#"["api"]"#);
-    let wf = e.root.join("_forests/shop/feat-big");
+    let wf = e.root.join("_forests/shop");
     fs::create_dir_all(&wf).unwrap();
-    let want = identity("workforest", "shop", "feat-big", Value::Null, &wf);
-    assert_eq!(e.forest(&["path", "shop:feat-big", "--json"]).json(), want);
+    let want = identity("forest", "shop", "shop", Value::Null, &wf);
+    assert_eq!(e.forest(&["path", "shop", "--json"]).json(), want);
     assert_eq!(e.forest_in(&wf, &["path", "--json"]).json(), want);
 
     // A detached member doesn't give it a branch either.
@@ -758,7 +727,8 @@ fn json_identity_of_a_workforest_without_a_branch() {
     );
     assert_eq!(e.forest_in(&member, &["path", "--json"]).json(), want);
     let ls = e.forest(&["ls", "shop", "--json"]).json();
-    assert_eq!(ls["forests"][0]["workforests"][0]["branch"], Value::Null);
+    assert_eq!(ls["forests"][0]["branch"], Value::Null);
+    assert_eq!(ls["forests"][0]["projects"][0], "api");
 }
 
 #[test]

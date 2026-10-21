@@ -36,15 +36,14 @@ pub fn prune(layout: &Layout) -> Result<Output> {
         }
     }
     for f in layout.forests()? {
-        for workforest in subdirs(&layout.forest_dir(&f))? {
-            let members = subdirs(&workforest)?;
-            // No worktrees left: the dir is a leftover, whatever files it still holds.
-            if members.is_empty() {
-                orphans.push(workforest);
-                continue;
-            }
-            orphans.extend(members.into_iter().filter(|m| !registered.contains(m)));
+        let forest = layout.forest_dir(&f);
+        let members = subdirs(&forest)?;
+        // No worktrees left: the dir is a leftover, whatever files it still holds.
+        if members.is_empty() {
+            orphans.push(forest);
+            continue;
         }
+        orphans.extend(members.into_iter().filter(|m| !registered.contains(m)));
     }
     for o in &orphans {
         text.push_str(&format!("orphaned: {}\n", o.display()));

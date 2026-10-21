@@ -1,6 +1,5 @@
-//! `ls`: projects, forests, worktrees and workforests with their state.
+//! `ls`: projects and forests with their worktrees and state.
 
-use std::fs;
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -9,7 +8,7 @@ use serde_json::{Value, json};
 use crate::Output;
 use crate::error::Result;
 use crate::git::git;
-use crate::layout::{FORESTS, Layout, Name, canonical};
+use crate::layout::{FORESTS, Layout, Name};
 use crate::project::{default_branch, origin_url, worktrees};
 
 #[derive(Serialize)]
@@ -70,41 +69,25 @@ impl Row {
     }
 }
 
-struct Workforest {
-    dir: String,
-    path: PathBuf,
-    branch: Option<String>,
-}
-
 pub fn ls(layout: &Layout, name: Option<&str>) -> Result<Output> {
     let (projects, forests) = match name.map(|n| layout.resolve_name(n)).transpose()? {
         None => (layout.projects()?, layout.forests()?),
         Some(Name::Project(p)) => (vec![p], vec![]),
         Some(Name::Forest(f)) => (vec![], vec![f]),
     };
-    let forests: Vec<(String, Vec<String>)> = forests
-        .into_iter()
-        .map(|f| layout.forest_projects(&f).map(|members| (f, members)))
-        .collect::<Result<_>>()?;
-    // Rows come from the projects; a forest-only listing still needs its projects' rows.
-    let mut sources = projects.clone();
-    for (_, members) in &forests {
-        for p in members {
-            if layout.is_project(p) && !sources.contains(p) {
-                sources.push(p.clone());
-            }
-        }
-    }
+    // Rows come from the projects; a forest-only listing still needs every project's.
+    let sources = if forests.is_empty() {
+        projects.clone()
+    } else {
+        layout.projects()?
+    };
     let mut rows = Vec::new();
     for p in &sources {
         rows.extend(project_rows(layout, p)?);
     }
     // Keep only what is listed before running `git status` in each worktree.
     rows.retain(|r| {
-        projects.contains(&r.project)
-            || r.forest
-                .as_ref()
-                .is_some_and(|f| forests.iter().any(|(name, _)| name == f))
+        projects.contains(&r.project) || r.forest.as_ref().is_some_and(|f| forests.contains(f))
     });
     for row in rows.iter_mut().filter(|r| !r.missing) {
         fill_status(row);
@@ -131,7 +114,7 @@ pub fn ls(layout: &Layout, name: Option<&str>) -> Result<Output> {
             .iter()
             .map(|r| {
                 let place = match &r.forest {
-                    Some(f) => format!("{f}:{}", r.dir),
+                    Some(f) => format!("forest {f}"),
                     None => r.dir.clone(),
                 };
                 vec![place, r.branch_str().into(), r.head_str().into(), r.state()]
@@ -147,34 +130,36 @@ pub fn ls(layout: &Layout, name: Option<&str>) -> Result<Output> {
     }
 
     let mut forests_json = Vec::new();
-    for (f, members) in &forests {
-        text.push_str(&format!("{f}  [{}]\n", members.join(", ")));
-        let workforests = workforests(layout, f, &rows)?;
-        if workforests.is_empty() {
-            text.push_str("  (no workforests)\n");
+    for f in &forests {
+        let path = layout.forest_dir(f);
+        let mut members: Vec<&Row> = rows
+            .iter()
+            .filter(|r| r.forest.as_ref() == Some(f))
+            .collect();
+        members.sort_by(|a, b| a.project.cmp(&b.project));
+        let branch = members.iter().find_map(|r| r.branch.clone());
+        text.push_str(&format!("{f}  {}\n", branch.as_deref().unwrap_or("?")));
+        if members.is_empty() {
+            text.push_str("  (no worktrees)\n");
         }
-        let mut wf_json = Vec::new();
-        for wf in &workforests {
-            text.push_str(&format!(
-                "  {}  {}\n",
-                wf.dir,
-                wf.branch.as_deref().unwrap_or("?")
-            ));
-            let table = members
-                .iter()
-                .map(|p| match rows.iter().find(|r| r.path == wf.path.join(p)) {
-                    Some(r) => vec![p.clone(), r.head_str().into(), r.state()],
-                    None => vec![p.clone(), "(not created)".into(), String::new()],
-                })
-                .collect();
-            text.push_str(&align(table, 4));
-            wf_json.push(json!({"dir": wf.dir, "branch": wf.branch, "path": wf.path}));
-        }
+        let table = members
+            .iter()
+            .map(|r| {
+                let mut state = r.state();
+                // Members normally share the forest's branch; say so when one doesn't.
+                if r.branch != branch {
+                    state = format!("{state}, on {}", r.branch_str());
+                }
+                vec![r.project.clone(), r.head_str().into(), state]
+            })
+            .collect();
+        text.push_str(&align(table, 2));
+        let names: Vec<&str> = members.iter().map(|r| r.project.as_str()).collect();
         forests_json.push(json!({
             "name": f,
-            "path": layout.forest_dir(f),
-            "projects": members,
-            "workforests": wf_json,
+            "path": path,
+            "branch": branch,
+            "projects": names,
         }));
     }
     if projects.is_empty() && forests.is_empty() {
@@ -195,7 +180,7 @@ fn project_rows(layout: &Layout, project: &str) -> Result<Vec<Row>> {
     let forests_dir = layout.root.join(FORESTS);
     let mut rows = Vec::new();
     for w in worktrees(&layout.bare(project))? {
-        // <root>/_forests/<forest>/<dir>/<project>
+        // <root>/_forests/<forest>/<project>
         let in_forest = w
             .path
             .strip_prefix(&forests_dir)
@@ -205,11 +190,9 @@ fn project_rows(layout: &Layout, project: &str) -> Result<Vec<Row>> {
                     .map(|c| c.to_string_lossy().into_owned())
                     .collect::<Vec<_>>()
             })
-            .filter(|parts| parts.len() == 3);
-        let (forest, dir) = match in_forest {
-            Some(parts) => (Some(parts[0].clone()), parts[1].clone()),
-            None => (None, w.dir_name()),
-        };
+            .filter(|parts| parts.len() == 2);
+        let forest = in_forest.map(|parts| parts[0].clone());
+        let dir = w.dir_name();
         let row = Row {
             project: project.to_string(),
             branch: w.branch,
@@ -265,29 +248,6 @@ fn fill_status(row: &mut Row) {
     }
     row.dirty = Some(dirty);
     row.upstream_gone = row.upstream.is_some() && !has_ab;
-}
-
-fn workforests(layout: &Layout, forest: &str, rows: &[Row]) -> Result<Vec<Workforest>> {
-    let dir = layout.forest_dir(forest);
-    let mut list = Vec::new();
-    for entry in fs::read_dir(&dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let path = canonical(&entry.path());
-        let branch = rows
-            .iter()
-            .filter(|r| r.path.parent() == Some(path.as_path()))
-            .find_map(|r| r.branch.clone());
-        list.push(Workforest {
-            dir: entry.file_name().to_string_lossy().into_owned(),
-            path,
-            branch,
-        });
-    }
-    list.sort_by(|a, b| a.dir.cmp(&b.dir));
-    Ok(list)
 }
 
 /// Left-aligned columns, two spaces apart, trailing blanks trimmed.
