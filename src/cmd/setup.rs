@@ -1,34 +1,29 @@
-//! `init` and `clone`: create a project.
+//! `init` and `clone`: create a repo at `<root>/repos/<name>/`.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::json;
 
 use crate::Output;
 use crate::error::{Result, fail};
-use crate::git::{git, git_loud, relative_paths};
-use crate::layout::{BARE, Layout, slug, valid_project_name};
-use crate::project::{check_branch_name, default_branch, worktree_add};
+use crate::git::{git, git_loud};
+use crate::layout::{Layout, valid_name};
+use crate::project::{check_branch_name, configure, default_branch};
 
 pub fn init(layout: &Layout, name: &str, branch: Option<&str>) -> Result<Output> {
     if let Some(b) = branch {
         check_branch_name(b)?;
     }
-    create_project(layout, name, |dir, bare| {
-        let mut args = vec!["init", "--bare", "--quiet"];
+    create_repo(layout, name, |parent| {
+        let mut args = vec!["init", "--quiet"];
         let initial;
         if let Some(b) = branch {
             initial = format!("--initial-branch={b}");
             args.push(&initial);
         }
-        args.push(BARE);
-        git(dir, args)?;
-        configure(bare)?;
-        let default = default_branch(bare)?;
-        let worktree = dir.join(slug(&default));
-        worktree_add(bare, &["--orphan", "-b", &default], &worktree, &[])?;
-        Ok((default, worktree))
+        args.push(name);
+        git(parent, args).map(|_| ())
     })
 }
 
@@ -36,70 +31,44 @@ pub fn clone(layout: &Layout, url: &str, name: Option<&str>) -> Result<Output> {
     let name = match name {
         Some(n) => n.to_string(),
         None => name_from_url(url)
-            .ok_or_else(|| fail!("cannot derive a project name from '{url}'; pass one"))?,
+            .ok_or_else(|| fail!("cannot derive a repo name from '{url}'; pass one"))?,
     };
-    // A local path must stay valid when git runs inside the bare repo.
+    // A local path must stay valid when git runs in the repos dir.
     let local = Path::new(url);
     let url = if local.exists() {
         local.canonicalize()?.to_string_lossy().into_owned()
     } else {
         url.to_string()
     };
-    create_project(layout, &name, |dir, bare| {
-        git(dir, ["init", "--bare", "--quiet", BARE])?;
-        configure(bare)?;
-        git(bare, ["remote", "add", "origin", &url])?;
-        git_loud(bare, ["fetch", "origin"])?;
-        git(bare, ["remote", "set-head", "origin", "--auto"]).map_err(|e| {
-            fail!("cannot determine the remote's default branch (is it empty?): {e}")
-        })?;
-        let default = default_branch(bare)?;
-        git(
-            bare,
-            ["symbolic-ref", "HEAD", &format!("refs/heads/{default}")],
-        )?;
-        let worktree = dir.join(slug(&default));
-        let upstream = format!("origin/{default}");
-        worktree_add(bare, &["--track", "-b", &default], &worktree, &[&upstream])?;
-        Ok((default, worktree))
+    create_repo(layout, &name, |parent| {
+        git_loud(parent, ["clone", &url, &name])
     })
 }
 
-/// Creates `<root>/<name>/`, runs `setup` in it, and removes it again if setup fails.
-fn create_project(
+/// Runs `setup` in the repos dir to make `<name>`, and removes it again on failure.
+fn create_repo(
     layout: &Layout,
     name: &str,
-    setup: impl FnOnce(&Path, &Path) -> Result<(String, PathBuf)>,
+    setup: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<Output> {
-    valid_project_name(name)?;
-    if layout.is_forest(name) {
-        return Err(fail!(
-            "a forest named '{name}' exists; a project can't share its name"
-        ));
-    }
-    let dir = layout.project_dir(name);
+    valid_name(name)?;
+    let dir = layout.repo_dir(name);
     if dir.exists() {
         return Err(fail!("{} already exists", dir.display()));
     }
-    fs::create_dir_all(&dir)?;
+    let parent = layout.repos_dir();
+    fs::create_dir_all(&parent)?;
+    let result = setup(&parent).and_then(|()| configure(&dir));
+    if let Err(e) = result {
+        let _ = fs::remove_dir_all(&dir);
+        return Err(e);
+    }
     let dir = dir.canonicalize()?;
-    match setup(&dir, &dir.join(BARE)) {
-        Ok((branch, worktree)) => Ok(Output::new(
-            format!("{}\n", worktree.display()),
-            json!({"project": name, "branch": branch, "path": worktree}),
-        )),
-        Err(e) => {
-            let _ = fs::remove_dir_all(&dir);
-            Err(e)
-        }
-    }
-}
-
-fn configure(bare: &Path) -> Result<()> {
-    if relative_paths() {
-        git(bare, ["config", "worktree.useRelativePaths", "true"])?;
-    }
-    Ok(())
+    let branch = default_branch(&dir).ok();
+    Ok(Output::new(
+        format!("{}\n", dir.display()),
+        json!({"project": name, "branch": branch, "path": dir}),
+    ))
 }
 
 /// `git@host:org/shop.git` → `shop`, `/src/shop/.git` → `shop`.

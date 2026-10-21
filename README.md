@@ -7,29 +7,28 @@ Work on many branches at once, in one repo or across several, without thinking a
 ## What you get
 
 - **Parallel work without switching.** Every branch gets its own folder. You can review a PR, fix a bug and keep building a feature at the same time, with no stashing and no rebuilds after a checkout.
-- **One command to start, one to finish.** `forest new` gives you a ready folder for a branch. `forest rm` cleans it up again, and refuses if you would lose work.
+- **One command to start, one to finish.** `forest new` gives you a ready folder for a branch. `forest rm` cleans it up again, and refuses if you would lose work. `forest clean` clears away everything that is merged.
 - **Everything has a known place.** Branches live at predictable paths, so you never search for "that checkout from last week". `forest ls` shows all of them with their status.
-- **Branches across repos.** When a change spans several repos, forest gives you one folder with the same branch checked out in each of them.
+- **Branches across repos.** When a change spans several repos, the same branch of each sits side by side in one folder.
 
 ## Forests
 
-A forest is a folder with the same branch checked out in several repos, for a change that spans them, for example a backend and its frontend. You make one when you need it:
+A forest is the folder for one branch. It holds a checkout of that branch for each repo you work on in it:
 
 ```sh
-forest new feat/auth backend frontend
+forest new feat/auth backend            # forests/feat-auth/backend/
+forest new feat/auth frontend           # forests/feat-auth/frontend/, added later
 ```
 
-This creates branch `feat/auth` in both repos and puts them side by side in one folder:
+You work in that folder as one workspace: open it in your editor, run both services, make one change across both repos. Each repo still commits and pushes on its own, as usual. When the feature is done, `forest rm feat/auth` removes the whole thing.
 
+A forest is named after its branch. `--as` gives a new forest another name, when the branch says too little:
+
+```sh
+forest new cancellation tuna-agent --as tuna-cancel
 ```
-_forests/feat-auth/
-  backend/     # on feat/auth
-  frontend/    # on feat/auth
-```
 
-The forest is named after the branch, like a worktree folder; `--name` picks another name. You work in that folder as one workspace: open it in your editor, run both services, make one change across both repos. Each repo still commits and pushes on its own, as usual. When the feature is done, `forest rm feat-auth` removes the whole thing.
-
-Nothing is defined up front, and nothing is stored besides the folder: a forest's repos are the worktrees in it.
+Both the name and the branch address it afterwards, and `forest mv` renames it. Nothing is stored besides the folders: a forest's repos are the worktrees in it.
 
 ## Layout
 
@@ -37,18 +36,18 @@ All repos live under one root (`~/projects`, or `$FOREST_ROOT`):
 
 ```
 ~/projects/
-  backend/
-    main/
-    feat-x/          # branch feat/x
-  frontend/
-    main/
-  _forests/
-    feat-auth/
+  repos/
+    backend/         # a normal clone, on the default branch
+    frontend/
+  forests/
+    feat-auth/       # branch feat/auth
       backend/
       frontend/
+    tuna-cancel/     # branch cancellation
+      tuna-agent/
 ```
 
-The layout is fixed on purpose, so there is nothing to configure.
+The layout is fixed on purpose, so there is nothing to configure. Other folders in the root are left alone.
 
 ## Usage
 
@@ -56,50 +55,51 @@ The layout is fixed on purpose, so there is nothing to configure.
 forest clone git@github.com:me/backend.git   # or: forest init <name> for a new repo
 forest clone git@github.com:me/frontend.git
 
-forest new backend:feat/x                    # one repo
-cd "$(forest path backend:feat/x)"
+forest new feat/x backend                    # one repo
+cd "$(forest path feat/x)"
 
-forest new feat/auth backend frontend        # same branch in several repos
-cd "$(forest path feat-auth)"
+forest new feat/auth backend frontend        # the same branch in several repos
 
 forest ls                                    # everything, with dirty / ahead / behind
-forest rm feat-auth --delete-branch          # clean up worktrees and branches
+forest rm feat/auth --delete-branch          # clean up worktrees and branches
+forest clean                                 # remove every forest that is done
 ```
 
-You address a worktree as `<project>:<branch>`, wherever it is, also inside a forest. Inside a project folder, `:<branch>` is enough. A word without `:` is always a forest. `path` and `rm` with no argument act on the worktree or forest you are in.
+A target is a forest, by its name or its branch, or a repo, which means its own checkout. A repo after it picks one worktree: `forest path feat/auth backend`, or `forest path main backend` for the repo's checkout. Names match exactly, and a word that names two things is an error, never a guess. `path` and `rm` with no argument act on the forest or repo you are in.
 
 | Command | Purpose |
 |---|---|
-| `init <name> [--branch <b>]` | New project with no remote |
-| `clone <url> [name]` | New project from a remote, or from a local repo |
-| `migrate <path> [name]` | Move an existing clone or bare repo into the layout |
-| `new <project>:<branch> [--from <ref>]` | Create a worktree (or `new :<branch>` inside a project) |
-| `new <branch> <projects…> [--name <forest>] [--from <ref>]` | Create a forest with one worktree per project |
-| `ls [name]` | List projects and forests with their worktrees and status |
-| `path [target]` | Print the absolute path |
-| `rm [target] [--force] [--delete-branch]` | Remove worktrees, and optionally their branches |
+| `init <name> [--branch <b>]` | New repo with no remote |
+| `clone <url> [name]` | New repo from a remote, or from a local repo |
+| `migrate <path> [name]` | Move an existing clone, bare repo or older layout into the layout |
+| `new <branch> <repo>… [--as <name>] [--from <ref>]` | Check out a branch in repos, in its forest |
+| `ls [target]` | List repos and forests with their status |
+| `path [target [repo]]` | Print the absolute path |
+| `rm [target [repo]] [--force] [--delete-branch]` | Remove a forest or one of its worktrees, and optionally their branches |
+| `mv <forest> <name>` | Rename a forest |
+| `clean [--dry-run] [--delete-branch]` | Remove every forest whose work is done |
 | `prune` | Clean up stale worktree metadata |
 
 Global flags: `--json` (versioned output for scripts) and `--root <path>`.
 
-With `--json`, `path`, `new` and `rm` describe their target the same way however it was given:
+With `--json`, `path`, `new`, `rm` and `mv` describe their target the same way however it was given:
 
 ```json
-{"v":1,"kind":"forest","name":"feat-auth","dir":"feat-auth","branch":"feat/auth","path":"/Users/me/projects/_forests/feat-auth","forest":null}
+{"v":1,"kind":"forest","forest":"feat-auth","project":null,"branch":"feat/auth","path":"/Users/me/projects/forests/feat-auth"}
 ```
 
-`kind` is `worktree` or `forest`, `name` is the project or forest, and `forest` is the forest a worktree belongs to (else `null`). (`kind`, `name`, `forest`, `dir`) is unique. `branch` is `null` for a detached worktree, or a forest with no worktree on a branch.
+`kind` is `forest` or `worktree`. A worktree has its `project`, and its `forest` unless it is the repo's own checkout. `branch` is `null` for a detached worktree, or a forest with no worktree on a branch.
 
 ## Good to know
 
-- Branch folders are flat, so `feat/x` becomes `feat-x`. `ls` shows the real branch name.
-- `new` only creates. It fails if the worktree or forest already exists, and a forest is all or nothing: if one repo fails, the worktrees and branches it made are removed again.
+- Forest folders are flat, so `feat/x` becomes `feat-x`. `ls` shows the real branch name when it differs.
+- `new` adds to the forest that has the branch already, else makes one. It fails if a worktree is there already, and is all or nothing: if one repo fails, the worktrees and branches it made are removed again.
 - `new` uses an existing local branch, else the remote branch (with tracking), else creates a new branch from `--from` or the default branch. It says which on stderr, and as `branch_created` and `from` with `--json`. `--from` is only for a new branch, and must exist in every repo.
-- A forest can't share its name with a project.
-- Git allows a branch to be checked out in only one worktree. This means a forest can't check out `main`, because each project's `main/` folder already holds it.
-- `rm <project>:<branch>` on a forest's worktree removes only that one; the forest goes with its last worktree.
-- `rm` never loses commits. It refuses if there are uncommitted changes or if you target a default-branch worktree. `--delete-branch` only deletes a branch that is merged, pushed, or whose upstream is gone.
-- `migrate` moves the working tree instead of checking it out again, so staged, untracked and ignored files survive. Other worktrees are moved to their branch folders. It refuses a detached HEAD or an operation in progress, and a repo outside the root must be on the same filesystem.
+- Git allows a branch to be checked out in only one worktree. A repo's own checkout holds its default branch, so no forest can have it.
+- `rm` never removes a repo's own checkout. It refuses if there are uncommitted changes. `--delete-branch` only deletes a branch if every commit is on a remote-tracking branch or on the default branch, and never the default branch itself.
+- `clean` removes a forest when none of its worktrees has uncommitted changes, and each branch is merged into the default branch or its upstream is gone. A branch nobody committed on yet doesn't count as merged. Ignored files go with the forest, as with `rm`. Branches stay, unless `--delete-branch`, which follows the same rule as `rm`: a squash-merged branch with commits that were never pushed is kept.
+- `mv` renames only the folder, and tells git where the worktrees are now. Renaming a folder by hand breaks that link; `git worktree repair` in the repo fixes it.
+- `migrate` moves working trees instead of checking them out again, so staged, untracked and ignored files survive. For a bare repo, the worktree on the default branch becomes the repo's checkout, and the others move to their forests. Worktrees inside the repo stay where they are. It refuses an operation in progress in the worktree that becomes the checkout, and a repo outside the root must be on the same filesystem.
 - Exit codes: `0` ok, `1` error, `2` refused by a safety check.
 
 ## Install

@@ -1,5 +1,7 @@
+pub mod clean;
 pub mod ls;
 pub mod migrate;
+pub mod mv;
 pub mod new;
 pub mod path;
 pub mod prune;

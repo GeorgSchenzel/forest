@@ -1,4 +1,4 @@
-//! `new`: create a worktree, or a forest with one worktree per project.
+//! `new`: put worktrees on a branch into its forest, making the forest if needed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,10 +9,10 @@ use crate::Output;
 use crate::cmd::path::Identity;
 use crate::error::{Result, fail};
 use crate::git::git;
-use crate::layout::{Layout, slug, valid_forest_name};
+use crate::layout::{Layout, slug, valid_name};
 use crate::project::{
-    check_branch_name, commit_exists, default_branch, fetch, live_worktrees, origin_url,
-    ref_exists, worktree_add,
+    Worktree, all_worktrees, check_branch_name, commit_exists, default_branch, fetch, forests_on,
+    live_worktrees, origin_url, ref_exists, worktree_add,
 };
 
 /// Where a new worktree's branch came from.
@@ -55,83 +55,51 @@ impl Start {
     }
 }
 
-/// With `projects`, `target` is the forest's branch; else it is `<project>:<branch>`
-/// or `:<branch>`.
+/// Puts a worktree of each project on `branch` into the forest that already has
+/// that branch, else into a new forest named `alias` or after the branch.
 pub fn new(
     layout: &Layout,
-    target: &str,
-    projects: &[String],
-    name: Option<&str>,
-    from: Option<&str>,
-) -> Result<Output> {
-    if !projects.is_empty() {
-        check_branch_name(target)?;
-        let name = name.map_or_else(|| slug(target), str::to_string);
-        return new_forest(layout, &name, projects, target, from);
-    }
-    if name.is_some() {
-        return Err(fail!(
-            "--name is for forests: forest new <branch> <project>... --name <forest>"
-        ));
-    }
-    let Some((project, branch)) = layout.split_target(target)? else {
-        return Err(fail!(
-            "'{target}' needs projects to make a forest (forest new {target} <project>...), \
-             or <project>:{target} or :{target} to make a worktree"
-        ));
-    };
-    new_worktree(layout, &project, &branch, from)
-}
-
-fn new_worktree(
-    layout: &Layout,
-    project: &str,
     branch: &str,
-    from: Option<&str>,
-) -> Result<Output> {
-    check_project(layout, project)?;
-    let dir = slug(branch);
-    let path = layout.project_dir(project).join(&dir);
-    let start = create_worktree(layout, project, branch, &path, from)?;
-    start.report(project, branch);
-    Ok(Output::new(
-        format!("{}\n", path.display()),
-        Identity {
-            kind: "worktree",
-            name: project.to_string(),
-            dir,
-            branch: Some(branch.to_string()),
-            path: path.clone(),
-            forest: None,
-        }
-        .with(json!({"worktrees": [start.json(project, &path)]})),
-    ))
-}
-
-/// All or nothing: if any project fails, the worktrees and branches made so far are
-/// removed again, and so is the forest dir.
-fn new_forest(
-    layout: &Layout,
-    name: &str,
     projects: &[String],
-    branch: &str,
+    alias: Option<&str>,
     from: Option<&str>,
 ) -> Result<Output> {
-    valid_forest_name(name)?;
-    if layout.is_project(name) {
-        return Err(fail!(
-            "a project named '{name}' exists; a forest can't share its name (use --name)"
-        ));
-    }
-    let dir = layout.forest_dir(name);
-    if dir.exists() {
-        return Err(fail!("forest '{name}' already exists at {}", dir.display()));
-    }
+    check_branch_name(branch)?;
     let mut unique: Vec<&String> = Vec::new();
     for p in projects {
         check_project(layout, p)?;
         if !unique.contains(&p) {
             unique.push(p);
+        }
+    }
+
+    let all = all_worktrees(layout)?;
+    let holding = forests_on(&all, layout, branch);
+    let (name, created) = match holding.as_slice() {
+        [f] => {
+            if let Some(a) = alias.filter(|a| a != f) {
+                return Err(fail!(
+                    "'{branch}' is in forest '{f}' already; --as '{a}' only names a new forest"
+                ));
+            }
+            (f.clone(), false)
+        }
+        [] => {
+            let name = alias.map_or_else(|| slug(branch), str::to_string);
+            check_new_name(layout, &all, &name, None)?;
+            (name, true)
+        }
+        _ => {
+            return Err(fail!(
+                "'{branch}' is in several forests: {}",
+                holding.join(", ")
+            ));
+        }
+    };
+    let dir = layout.forest_dir(&name);
+    for p in &unique {
+        if dir.join(p).exists() {
+            return Err(fail!("{} already exists", dir.join(p).display()));
         }
     }
 
@@ -146,9 +114,9 @@ fn new_forest(
             }
             Err(e) => {
                 for (p, path, start) in made.iter().rev() {
-                    let bare = layout.bare(p);
+                    let repo = layout.repo_dir(p);
                     let _ = git(
-                        &bare,
+                        &repo,
                         [
                             "worktree".as_ref(),
                             "remove".as_ref(),
@@ -157,10 +125,12 @@ fn new_forest(
                         ],
                     );
                     if start.created() {
-                        let _ = git(&bare, ["branch", "-D", branch]);
+                        let _ = git(&repo, ["branch", "-D", branch]);
                     }
                 }
-                let _ = fs::remove_dir_all(&dir);
+                if created {
+                    let _ = fs::remove_dir_all(&dir);
+                }
                 return Err(fail!("{p}: {e}\nnothing was created"));
             }
         }
@@ -171,16 +141,48 @@ fn new_forest(
         .collect();
     Ok(Output::new(
         format!("{}\n", dir.display()),
-        Identity::forest(name, &dir, Some(branch.to_string()))
-            .with(json!({"worktrees": worktrees})),
+        Identity::forest(&name, &dir, Some(branch.to_string()))
+            .with(json!({"created": created, "worktrees": worktrees})),
     ))
+}
+
+/// A new forest's name must be free, and must not name anything else a target can;
+/// `own` is the forest being renamed, whose branch it may take.
+pub fn check_new_name(
+    layout: &Layout,
+    all: &[(String, Worktree)],
+    name: &str,
+    own: Option<&str>,
+) -> Result<()> {
+    valid_name(name)?;
+    let dir = layout.forest_dir(name);
+    if dir.exists() {
+        return Err(fail!(
+            "{} already exists; pick another name with --as",
+            dir.display()
+        ));
+    }
+    if layout.is_project(name) {
+        return Err(fail!(
+            "'{name}' is the name of a repo; pick another name with --as"
+        ));
+    }
+    if let Some(f) = forests_on(all, layout, name)
+        .iter()
+        .find(|f| Some(f.as_str()) != own)
+    {
+        return Err(fail!(
+            "'{name}' is the branch of forest '{f}'; pick another name with --as"
+        ));
+    }
+    Ok(())
 }
 
 fn check_project(layout: &Layout, project: &str) -> Result<()> {
     if layout.is_project(project) {
         Ok(())
     } else {
-        Err(fail!("no project named '{project}'"))
+        Err(fail!("no repo named '{project}'"))
     }
 }
 
@@ -193,10 +195,9 @@ fn create_worktree(
     path: &Path,
     from: Option<&str>,
 ) -> Result<Start> {
-    check_branch_name(branch)?;
-    let bare = layout.bare(project);
+    let repo = layout.repo_dir(project);
     // Pruned first, so a deleted worktree can be made again.
-    let existing = live_worktrees(&bare)?;
+    let existing = live_worktrees(&repo)?;
     if path.exists() || existing.iter().any(|w| w.path == path) {
         return Err(fail!("{} already exists", path.display()));
     }
@@ -210,13 +211,13 @@ fn create_worktree(
         ));
     }
 
-    if origin_url(&bare).is_some() {
-        fetch(&bare)?;
+    if origin_url(&repo).is_some() {
+        fetch(&repo)?;
     }
     let remote = format!("origin/{branch}");
-    let exists = if ref_exists(&bare, &format!("refs/heads/{branch}")) {
+    let exists = if ref_exists(&repo, &format!("refs/heads/{branch}")) {
         Some(Start::Local)
-    } else if ref_exists(&bare, &format!("refs/remotes/{remote}")) {
+    } else if ref_exists(&repo, &format!("refs/remotes/{remote}")) {
         Some(Start::Remote(remote))
     } else {
         None
@@ -234,18 +235,18 @@ fn create_worktree(
         match &start {
             Start::Remote(r) => {
                 let r = format!("refs/remotes/{r}");
-                worktree_add(&bare, &["--track", "-b", branch], path, &[&r])?
+                worktree_add(&repo, &["--track", "-b", branch], path, &[&r])?
             }
-            _ => worktree_add(&bare, &[], path, &[branch])?,
+            _ => worktree_add(&repo, &[], path, &[branch])?,
         }
         return Ok(start);
     }
     let base = match from {
-        Some(f) if commit_exists(&bare, f) => f.to_string(),
+        Some(f) if commit_exists(&repo, f) => f.to_string(),
         Some(f) => return Err(fail!("ref '{f}' not found in {project}")),
-        None => default_base(&bare, project)?,
+        None => default_base(&repo, project)?,
     };
-    worktree_add(&bare, &["--no-track", "-b", branch], path, &[&base])?;
+    worktree_add(&repo, &["--no-track", "-b", branch], path, &[&base])?;
     Ok(Start::New(short_ref(&base).to_string()))
 }
 
@@ -258,13 +259,13 @@ fn short_ref(r: &str) -> &str {
 
 /// The default branch to start new branches from: `origin/<default>` when it exists
 /// (just fetched, so freshest), else the local one.
-fn default_base(bare: &Path, project: &str) -> Result<String> {
-    let default = default_branch(bare)?;
+fn default_base(repo: &Path, project: &str) -> Result<String> {
+    let default = default_branch(repo)?;
     for r in [
         format!("refs/remotes/origin/{default}"),
         format!("refs/heads/{default}"),
     ] {
-        if commit_exists(bare, &r) {
+        if commit_exists(repo, &r) {
             return Ok(r);
         }
     }

@@ -1,4 +1,4 @@
-//! `rm`: remove a worktree or a whole forest, refusing anything that could lose work.
+//! `rm`: remove a forest or one of its worktrees, refusing anything that could lose work.
 
 use std::env;
 use std::fs;
@@ -11,27 +11,40 @@ use crate::cmd::path::{Located, locate};
 use crate::error::{Error, Result, fail};
 use crate::git::git;
 use crate::layout::{Layout, canonical};
-use crate::project::{branch_is_safe_to_delete, default_branch, is_dirty, worktrees};
+use crate::project::{default_branch, is_dirty, members, unsaved_commits};
 
-struct Item {
-    project: String,
-    path: PathBuf,
-    branch: Option<String>,
-    missing: bool,
+pub struct Item {
+    pub project: String,
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub missing: bool,
 }
 
 pub fn rm(
     layout: &Layout,
     target: Option<&str>,
+    project: Option<&str>,
     force: bool,
     delete_branch: bool,
 ) -> Result<Output> {
-    let located = locate(layout, target)?;
+    let located = locate(layout, target, project)?;
     let identity = located.identity(layout)?;
     // Before removing: a deleted cwd can't be resolved.
     let cwd_in_target = env::current_dir().is_ok_and(|c| canonical(&c).starts_with(&identity.path));
     let (items, orphans, forest) = match located {
-        Located::Worktree { project, worktree } => {
+        Located::Forest { name, dir } => {
+            let (items, orphans) = forest_items(layout, &name, &dir)?;
+            (items, orphans, Some(dir))
+        }
+        Located::Worktree {
+            project, worktree, ..
+        } => {
+            if worktree.home {
+                return Err(fail!(
+                    "{} is the home of {project}; forest never removes it",
+                    worktree.path.display()
+                ));
+            }
             let item = Item {
                 missing: !worktree.path.exists(),
                 path: worktree.path,
@@ -40,24 +53,22 @@ pub fn rm(
             };
             (vec![item], vec![], None)
         }
-        Located::Forest { dir, .. } => {
-            let (items, orphans) = forest_items(layout, &dir)?;
-            (items, orphans, Some(dir))
-        }
     };
 
     // Check everything first: any refusal refuses the whole rm.
     let mut refusals = Vec::new();
+    for item in &items {
+        refusals.extend(check(layout, item, force, delete_branch)?);
+    }
     if !force {
-        for item in &items {
-            refusals.extend(check(layout, item, delete_branch)?);
-        }
         for o in &orphans {
             refusals.push(format!("{} is not a worktree", o.display()));
         }
     }
     if !refusals.is_empty() {
-        refusals.push("use --force to override".into());
+        if !force {
+            refusals.push("use --force to override".into());
+        }
         return Err(Error::Refused(refusals.join("\n")));
     }
 
@@ -81,33 +92,28 @@ pub fn rm(
             Err(e) => errors.push(format!("{}: {e}", item.project)),
         }
     }
-    // Even with --force, entries that aren't worktrees are never deleted; they keep
-    // the forest dir.
-    if let Some(dir) = &forest
+    // A forest goes with its last worktree. Entries that aren't worktrees are never
+    // deleted, even with --force; they keep the forest dir.
+    let dir = forest.or_else(|| {
+        items
+            .first()
+            .and_then(|i| i.path.parent().map(Path::to_path_buf))
+    });
+    if let Some(dir) = dir
         && errors.is_empty()
+        && dir.parent() == Some(layout.forests_dir().as_path())
     {
-        if !orphans.is_empty() {
+        if fs::read_dir(&dir).is_ok_and(|mut d| d.next().is_none()) {
+            match fs::remove_dir(&dir) {
+                Ok(()) => text.push_str(&format!("removed {}\n", dir.display())),
+                Err(e) => errors.push(format!("cannot remove {}: {e}", dir.display())),
+            }
+        } else if !orphans.is_empty() {
             errors.push(format!(
                 "kept {}: it holds entries that are not worktrees",
                 dir.display()
             ));
-        } else {
-            match fs::remove_dir(dir) {
-                Ok(()) => text.push_str(&format!("removed {}\n", dir.display())),
-                Err(e) => errors.push(format!("cannot remove {}: {e}", dir.display())),
-            }
         }
-    }
-    // A forest whose last member was removed goes too.
-    if forest.is_none()
-        && let Some(item) = items.first()
-        && errors.is_empty()
-        && layout.forest_of(&item.path).is_some()
-        && let Some(dir) = item.path.parent()
-        && fs::read_dir(dir).is_ok_and(|mut d| d.next().is_none())
-        && fs::remove_dir(dir).is_ok()
-    {
-        text.push_str(&format!("removed {}\n", dir.display()));
     }
     if !errors.is_empty() && removed.is_empty() {
         return Err(fail!("{}", errors.join("\n")));
@@ -132,79 +138,78 @@ pub fn rm(
     Ok(out)
 }
 
-/// The worktrees in a forest dir, including registered ones whose dir is
-/// gone, and entries that aren't worktrees.
-fn forest_items(layout: &Layout, dir: &Path) -> Result<(Vec<Item>, Vec<PathBuf>)> {
-    let dir = canonical(dir);
-    let mut items = Vec::new();
-    for project in layout.projects()? {
-        for w in worktrees(&layout.bare(&project))? {
-            if w.path.parent() == Some(dir.as_path()) {
-                items.push(Item {
-                    project: project.clone(),
-                    missing: !w.path.exists(),
-                    path: w.path,
-                    branch: w.branch,
-                });
-            }
-        }
-    }
+/// The worktrees in a forest dir, including registered ones whose dir is gone, and
+/// entries that aren't worktrees.
+pub fn forest_items(layout: &Layout, name: &str, dir: &Path) -> Result<(Vec<Item>, Vec<PathBuf>)> {
+    let items: Vec<Item> = members(layout, name)?
+        .into_iter()
+        .map(|(project, w)| Item {
+            project,
+            missing: !w.path.exists(),
+            path: w.path,
+            branch: w.branch,
+        })
+        .collect();
     let mut orphans = Vec::new();
-    for entry in fs::read_dir(&dir)? {
+    for entry in fs::read_dir(dir)? {
         let path = canonical(&entry?.path());
         if !items.iter().any(|i| i.path == path) {
             orphans.push(path);
         }
     }
-    items.sort_by(|a, b| a.path.cmp(&b.path));
     orphans.sort();
     Ok((items, orphans))
 }
 
-fn check(layout: &Layout, item: &Item, delete_branch: bool) -> Result<Vec<String>> {
+/// Why removing `item` could lose work. With `force`, only a default branch still
+/// refuses deletion.
+pub fn check(
+    layout: &Layout,
+    item: &Item,
+    force: bool,
+    delete_branch: bool,
+) -> Result<Vec<String>> {
     let mut refusals = Vec::new();
-    let bare = layout.bare(&item.project);
-    let default = default_branch(&bare)?;
+    let repo = layout.repo_dir(&item.project);
     let shown = item.path.display();
-    if !item.missing && is_dirty(&item.path)? {
+    if !force && !item.missing && is_dirty(&item.path)? {
         refusals.push(format!(
             "{shown} has uncommitted changes or untracked files"
         ));
     }
-    if item.branch.as_deref() == Some(default.as_str()) {
-        refusals.push(format!(
-            "{shown} is the default-branch worktree of {}",
-            item.project
-        ));
-    }
-    if delete_branch
-        && let Some(b) = &item.branch
-        && !branch_is_safe_to_delete(&bare, b, &default)
-    {
-        refusals.push(format!(
-            "branch '{b}' of {} has commits that are neither on a remote-tracking branch nor on '{default}'",
-            item.project
-        ));
+    if delete_branch && let Some(b) = &item.branch {
+        let default = default_branch(&repo)?;
+        if *b == default {
+            refusals.push(format!(
+                "'{b}' is the default branch of {}; it is never deleted",
+                item.project
+            ));
+        } else if !force && unsaved_commits(&repo, b, &default) != Some(0) {
+            refusals.push(format!(
+                "branch '{b}' of {} has commits that are neither on a remote-tracking branch nor on '{default}'",
+                item.project
+            ));
+        }
     }
     Ok(refusals)
 }
 
 /// Removes the worktree and, if asked, its branch. Returns whether the branch was deleted.
-fn remove(layout: &Layout, item: &Item, force: bool, delete_branch: bool) -> Result<bool> {
-    let bare = layout.bare(&item.project);
+pub fn remove(layout: &Layout, item: &Item, force: bool, delete_branch: bool) -> Result<bool> {
+    let repo = layout.repo_dir(&item.project);
     if item.missing {
-        git(&bare, ["worktree", "prune"])?;
+        git(&repo, ["worktree", "prune"])?;
     } else {
         let mut args: Vec<&std::ffi::OsStr> = vec!["worktree".as_ref(), "remove".as_ref()];
         if force {
             args.push("--force".as_ref());
         }
         args.push(item.path.as_os_str());
-        git(&bare, args)?;
+        git(&repo, args)?;
     }
     match (&item.branch, delete_branch) {
         (Some(b), true) => {
-            git(&bare, ["branch", "-D", b])?;
+            git(&repo, ["branch", "-D", b])?;
             Ok(true)
         }
         _ => Ok(false),

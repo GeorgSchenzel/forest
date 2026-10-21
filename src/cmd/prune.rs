@@ -1,4 +1,4 @@
-//! `prune`: `git worktree prune` everywhere, and report dirs that aren't worktrees.
+//! `prune`: `git worktree prune` in every repo, and report forest dirs that aren't worktrees.
 
 use std::collections::HashSet;
 use std::fs;
@@ -9,32 +9,24 @@ use serde_json::json;
 use crate::Output;
 use crate::error::Result;
 use crate::git::git_stderr;
-use crate::layout::{BARE, Layout};
+use crate::layout::Layout;
 use crate::project::worktrees;
 
 pub fn prune(layout: &Layout) -> Result<Output> {
     let mut text = String::new();
     let mut pruned = Vec::new();
     let mut registered = HashSet::new();
-    let projects = layout.projects()?;
-    for p in &projects {
-        let bare = layout.bare(p);
-        let out = git_stderr(&bare, ["worktree", "prune", "--verbose"])?;
+    for p in &layout.projects()? {
+        let repo = layout.repo_dir(p);
+        let out = git_stderr(&repo, ["worktree", "prune", "--verbose"])?;
         for line in out.lines().filter(|l| !l.is_empty()) {
             text.push_str(&format!("{p}: {line}\n"));
             pruned.push(json!({"project": p, "message": line}));
         }
-        registered.extend(worktrees(&bare)?.into_iter().map(|w| w.path));
+        registered.extend(worktrees(&repo)?.into_iter().map(|w| w.path));
     }
 
     let mut orphans = Vec::new();
-    for p in &projects {
-        for dir in subdirs(&layout.project_dir(p))? {
-            if dir.file_name().is_some_and(|n| n != BARE) && !registered.contains(&dir) {
-                orphans.push(dir);
-            }
-        }
-    }
     for f in layout.forests()? {
         let forest = layout.forest_dir(&f);
         let members = subdirs(&forest)?;

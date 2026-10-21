@@ -1,4 +1,4 @@
-//! `path`, and resolving a target (or cwd) to a worktree or forest.
+//! `path`, and resolving a target (or cwd) to a forest or a worktree.
 
 use std::path::{Path, PathBuf};
 
@@ -7,52 +7,45 @@ use serde_json::{Value, json};
 
 use crate::Output;
 use crate::error::{Result, fail};
-use crate::layout::{Layout, Name};
-use crate::project::{Worktree, worktrees};
+use crate::layout::{Context, Layout};
+use crate::project::{Worktree, all_worktrees, forests_on, members};
 
 pub enum Located {
-    Worktree { project: String, worktree: Worktree },
-    Forest { forest: String, dir: PathBuf },
+    Forest {
+        name: String,
+        dir: PathBuf,
+    },
+    /// A repo's home, a forest's worktree, or one outside the layout.
+    Worktree {
+        project: String,
+        worktree: Worktree,
+        forest: Option<String>,
+    },
 }
 
-/// What a worktree or forest is, the same however it was addressed. In JSON
+/// What a forest or worktree is, the same however it was addressed. In JSON
 /// output, next to the command's own fields.
 #[derive(Serialize)]
 pub struct Identity {
-    /// `"worktree"` or `"forest"`.
+    /// `"forest"` or `"worktree"`.
     pub kind: &'static str,
-    /// The project of a worktree, or the forest's own name.
-    pub name: String,
-    pub dir: String,
+    /// The forest, or the forest a worktree is in; `None` for a repo's home.
+    pub forest: Option<String>,
+    /// The worktree's repo; `None` for a forest.
+    pub project: Option<String>,
     /// `None` when detached, or for a forest without a worktree on a branch.
     pub branch: Option<String>,
     pub path: PathBuf,
-    /// The forest a worktree belongs to; `None` for one in its project dir, and for
-    /// a forest itself.
-    pub forest: Option<String>,
 }
 
 impl Identity {
-    pub fn worktree(layout: &Layout, project: &str, worktree: &Worktree) -> Self {
-        Identity {
-            kind: "worktree",
-            name: project.to_string(),
-            dir: worktree.dir_name(),
-            branch: worktree.branch.clone(),
-            path: worktree.path.clone(),
-            forest: layout.forest_of(&worktree.path),
-        }
-    }
-
-    /// `branch` as `ls` reports it: that of the first member worktree on one.
-    pub fn forest(forest: &str, dir: &Path, branch: Option<String>) -> Self {
+    pub fn forest(name: &str, dir: &Path, branch: Option<String>) -> Self {
         Identity {
             kind: "forest",
-            name: forest.to_string(),
-            dir: forest.to_string(),
+            forest: Some(name.to_string()),
+            project: None,
             branch,
             path: dir.to_path_buf(),
-            forest: None,
         }
     }
 
@@ -67,126 +60,143 @@ impl Identity {
 }
 
 impl Located {
-    pub fn path(&self) -> &PathBuf {
+    pub fn path(&self) -> &Path {
         match self {
-            Located::Worktree { worktree, .. } => &worktree.path,
             Located::Forest { dir, .. } => dir,
+            Located::Worktree { worktree, .. } => &worktree.path,
         }
     }
 
     pub fn identity(&self, layout: &Layout) -> Result<Identity> {
         Ok(match self {
-            Located::Worktree { project, worktree } => {
-                Identity::worktree(layout, project, worktree)
+            Located::Forest { name, dir } => {
+                Identity::forest(name, dir, forest_branch(layout, name)?)
             }
-            Located::Forest { forest, dir } => {
-                Identity::forest(forest, dir, forest_branch(layout, dir)?)
-            }
+            Located::Worktree {
+                project,
+                worktree,
+                forest,
+            } => Identity {
+                kind: "worktree",
+                forest: forest.clone(),
+                project: Some(project.clone()),
+                branch: worktree.branch.clone(),
+                path: worktree.path.clone(),
+            },
         })
     }
 }
 
-pub fn path(layout: &Layout, target: Option<&str>) -> Result<Output> {
-    let located = locate(layout, target)?;
-    let path = located.path();
+pub fn path(layout: &Layout, target: Option<&str>, project: Option<&str>) -> Result<Output> {
+    let located = locate(layout, target, project)?;
     Ok(Output::new(
-        format!("{}\n", path.display()),
+        format!("{}\n", located.path().display()),
         located.identity(layout)?.with(json!({})),
     ))
 }
 
-/// The branch of the first member worktree on one, in project order.
-fn forest_branch(layout: &Layout, dir: &Path) -> Result<Option<String>> {
-    for project in layout.projects()? {
-        if let Some(w) = worktrees(&layout.bare(&project))?
-            .into_iter()
-            .find(|w| w.path.parent() == Some(dir))
-            && w.branch.is_some()
-        {
-            return Ok(w.branch);
-        }
-    }
-    Ok(None)
+/// The branch of a forest's first worktree on one, in repo order.
+pub fn forest_branch(layout: &Layout, forest: &str) -> Result<Option<String>> {
+    Ok(members(layout, forest)?
+        .into_iter()
+        .find_map(|(_, w)| w.branch))
 }
 
-/// A target is `<project>:<branch>` (or `:<branch>` in the current project), a
-/// worktree wherever it is, or a bare word, a forest. Without one, it is the worktree
-/// or forest cwd is in.
-pub fn locate(layout: &Layout, target: Option<&str>) -> Result<Located> {
+/// What a word can name.
+#[derive(PartialEq)]
+enum Match {
+    /// A forest, by its name or by the branch of its worktrees.
+    Forest(String),
+    /// A repo's home.
+    Repo(String),
+}
+
+/// A target is a forest (by name or branch) or a repo; with `project`, that repo's
+/// worktree in the forest, or its worktree on the branch. Without a target, it is
+/// the forest or repo cwd is in. A word that names two things is an error.
+pub fn locate(layout: &Layout, target: Option<&str>, project: Option<&str>) -> Result<Located> {
     let Some(t) = target else {
-        return locate_cwd(layout);
+        return match layout.context() {
+            Some(Context::Forest(f)) => Ok(forest(layout, &f)),
+            Some(Context::Repo(p)) => home(layout, &p),
+            None => Err(fail!("not inside a repo or forest; give a target")),
+        };
     };
-    if let Some((p, branch)) = layout.split_target(t)? {
-        return find_worktree_by_branch(layout, &p, &branch)?
-            .ok_or_else(|| fail!("no worktree of {p} on '{branch}'"));
+    let all = all_worktrees(layout)?;
+    let mut matches = Vec::new();
+    if layout.is_forest(t) {
+        matches.push(Match::Forest(t.to_string()));
     }
-    if let Some(found) = find_forest(layout, t) {
-        return Ok(found);
-    }
-    // A branch of the current project was likely meant.
-    if let Some(p) = layout.context_project()
-        && find_worktree_by_branch(layout, &p, t)?.is_some()
-    {
-        return Err(fail!("no forest named '{t}'; for the branch, write ':{t}'"));
-    }
-    Err(fail!("no forest named '{t}'"))
-}
-
-fn locate_cwd(layout: &Layout) -> Result<Located> {
-    let ctx = layout
-        .context()
-        .ok_or_else(|| fail!("not inside a project or forest; give a target"))?;
-    match ctx.name {
-        Name::Forest(f) => find_forest(layout, &f),
-        Name::Project(p) => {
-            let Some(sub) = ctx.sub else {
-                return Err(fail!("not inside a worktree of '{p}'; give a branch"));
-            };
-            let path = layout.project_dir(&p).join(&sub);
-            find_worktree(layout, &p, |list| list.iter().position(|w| w.path == path))?
+    for f in forests_on(&all, layout, t) {
+        if !matches.contains(&Match::Forest(f.clone())) {
+            matches.push(Match::Forest(f));
         }
     }
-    .ok_or_else(|| fail!("the current directory is not in a worktree or forest"))
+    if project.is_none() && layout.is_project(t) {
+        matches.push(Match::Repo(t.to_string()));
+    }
+    if matches.len() > 1 {
+        let shown: Vec<String> = matches
+            .iter()
+            .map(|m| match m {
+                Match::Forest(f) => format!("forests/{f}"),
+                Match::Repo(p) => format!("repos/{p}"),
+            })
+            .collect();
+        return Err(fail!("'{t}' is ambiguous: {}", shown.join(", ")));
+    }
+
+    let Some(p) = project else {
+        return match matches.pop() {
+            Some(Match::Forest(f)) => Ok(forest(layout, &f)),
+            Some(Match::Repo(p)) => home(layout, &p),
+            None => Err(fail!("no forest, branch or repo named '{t}'")),
+        };
+    };
+    if !layout.is_project(p) {
+        return Err(fail!("no repo named '{p}'"));
+    }
+    // In the forest, else the repo's worktree on that branch (its home, say).
+    let in_forest = match matches.pop() {
+        Some(Match::Forest(f)) => Some(f),
+        _ => None,
+    };
+    let dir = in_forest.as_ref().map(|f| layout.forest_dir(f).join(p));
+    all.into_iter()
+        .find(|(q, w)| {
+            q == p
+                && match &dir {
+                    Some(d) => &w.path == d,
+                    None => w.branch.as_deref() == Some(t),
+                }
+        })
+        .map(|(project, worktree)| Located::Worktree {
+            forest: layout.forest_of(&worktree.path),
+            project,
+            worktree,
+        })
+        .ok_or_else(|| match in_forest {
+            Some(f) => fail!("forest '{f}' has no worktree of {p}"),
+            None => fail!("{p} has no worktree on '{t}'"),
+        })
 }
 
-/// The worktree on `branch`, in the project dir or a forest (git checks a branch out
-/// at most once), else the one in the project dir whose dir name is `branch`.
-fn find_worktree_by_branch(
-    layout: &Layout,
-    project: &str,
-    branch: &str,
-) -> Result<Option<Located>> {
-    let dir = layout.project_dir(project);
-    find_worktree(layout, project, |list| {
-        list.iter()
-            .position(|w| {
-                w.branch.as_deref() == Some(branch)
-                    && (w.path.parent() == Some(dir.as_path())
-                        || layout.forest_of(&w.path).is_some())
-            })
-            .or_else(|| {
-                list.iter()
-                    .position(|w| w.path.parent() == Some(dir.as_path()) && w.dir_name() == branch)
-            })
-    })
+fn forest(layout: &Layout, name: &str) -> Located {
+    Located::Forest {
+        name: name.to_string(),
+        dir: layout.forest_dir(name),
+    }
 }
 
-/// The worktree of `project` that `pick` chooses.
-fn find_worktree(
-    layout: &Layout,
-    project: &str,
-    pick: impl Fn(&[Worktree]) -> Option<usize>,
-) -> Result<Option<Located>> {
-    let mut list = worktrees(&layout.bare(project))?;
-    Ok(pick(&list).map(|i| Located::Worktree {
+fn home(layout: &Layout, project: &str) -> Result<Located> {
+    let repo = layout.repo_dir(project);
+    let worktree = crate::project::worktrees(&repo)?
+        .into_iter()
+        .find(|w| w.home)
+        .ok_or_else(|| fail!("{} has no checkout", repo.display()))?;
+    Ok(Located::Worktree {
         project: project.to_string(),
-        worktree: list.swap_remove(i),
-    }))
-}
-
-fn find_forest(layout: &Layout, forest: &str) -> Option<Located> {
-    layout.is_forest(forest).then(|| Located::Forest {
-        forest: forest.to_string(),
-        dir: layout.forest_dir(forest),
+        worktree,
+        forest: None,
     })
 }

@@ -1,4 +1,4 @@
-//! `ls`: projects and forests with their worktrees and state.
+//! `ls`: repos and forests with their worktrees and state.
 
 use std::path::PathBuf;
 
@@ -6,17 +6,20 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::Output;
+use crate::cmd::path::{Located, locate};
 use crate::error::Result;
 use crate::git::git;
-use crate::layout::{Layout, Name};
-use crate::project::{default_branch, origin_url, worktrees};
+use crate::layout::{Layout, slug};
+use crate::project::{all_worktrees, default_branch, origin_url};
 
 #[derive(Serialize)]
 struct Row {
     project: String,
     branch: Option<String>,
-    dir: String,
+    /// The forest it is in; `None` for a repo's home and worktrees outside the layout.
     forest: Option<String>,
+    /// The repo's own checkout.
+    home: bool,
     path: PathBuf,
     head: Option<String>,
     dirty: Option<bool>,
@@ -67,125 +70,22 @@ impl Row {
     fn head_str(&self) -> &str {
         self.head.as_deref().unwrap_or("(unborn)")
     }
+
+    fn elsewhere(&self) -> bool {
+        !self.home && self.forest.is_none()
+    }
 }
 
+/// Everything, or one repo (its home, the forests it is in and its other worktrees),
+/// or one forest.
 pub fn ls(layout: &Layout, name: Option<&str>) -> Result<Output> {
-    let (projects, forests) = match name.map(|n| layout.resolve_name(n)).transpose()? {
-        None => (layout.projects()?, layout.forests()?),
-        Some(Name::Project(p)) => (vec![p], vec![]),
-        Some(Name::Forest(f)) => (vec![], vec![f]),
-    };
-    // Rows come from the projects; a forest-only listing still needs every project's.
-    let sources = if forests.is_empty() {
-        projects.clone()
-    } else {
-        layout.projects()?
-    };
-    let mut rows = Vec::new();
-    for p in &sources {
-        rows.extend(project_rows(layout, p)?);
-    }
-    // Keep only what is listed before running `git status` in each worktree.
-    rows.retain(|r| {
-        projects.contains(&r.project) || r.forest.as_ref().is_some_and(|f| forests.contains(f))
-    });
-    for row in rows.iter_mut().filter(|r| !r.missing) {
-        fill_status(row);
-    }
-
-    let mut text = String::new();
-    let mut projects_json = Vec::new();
-    for p in &projects {
-        let bare = layout.bare(p);
-        let default = default_branch(&bare).ok();
-        let origin = origin_url(&bare);
-        text.push_str(&format!(
-            "{p}  (default: {}, {})\n",
-            default.as_deref().unwrap_or("?"),
-            origin
-                .as_deref()
-                .map_or("no origin".to_string(), |o| format!("origin {o}")),
-        ));
-        let mine: Vec<&Row> = rows.iter().filter(|r| &r.project == p).collect();
-        if mine.is_empty() {
-            text.push_str("  (no worktrees)\n");
-        }
-        let table = mine
-            .iter()
-            .map(|r| {
-                let place = match &r.forest {
-                    Some(f) => format!("forest {f}"),
-                    None => r.dir.clone(),
-                };
-                vec![place, r.branch_str().into(), r.head_str().into(), r.state()]
-            })
-            .collect();
-        text.push_str(&align(table, 2));
-        projects_json.push(json!({
-            "name": p,
-            "path": layout.project_dir(p),
-            "default_branch": default,
-            "origin": origin,
-        }));
-    }
-
-    let mut forests_json = Vec::new();
-    for f in &forests {
-        let path = layout.forest_dir(f);
-        let mut members: Vec<&Row> = rows
-            .iter()
-            .filter(|r| r.forest.as_ref() == Some(f))
-            .collect();
-        members.sort_by(|a, b| a.project.cmp(&b.project));
-        let branch = members.iter().find_map(|r| r.branch.clone());
-        text.push_str(&format!("{f}  {}\n", branch.as_deref().unwrap_or("?")));
-        if members.is_empty() {
-            text.push_str("  (no worktrees)\n");
-        }
-        let table = members
-            .iter()
-            .map(|r| {
-                let mut state = r.state();
-                // Members normally share the forest's branch; say so when one doesn't.
-                if r.branch != branch {
-                    state = format!("{state}, on {}", r.branch_str());
-                }
-                vec![r.project.clone(), r.head_str().into(), state]
-            })
-            .collect();
-        text.push_str(&align(table, 2));
-        let names: Vec<&str> = members.iter().map(|r| r.project.as_str()).collect();
-        forests_json.push(json!({
-            "name": f,
-            "path": path,
-            "branch": branch,
-            "projects": names,
-        }));
-    }
-    if projects.is_empty() && forests.is_empty() {
-        text.push_str(&format!("no projects in {}\n", layout.root.display()));
-    }
-
-    Ok(Output::new(
-        text,
-        json!({
-            "projects": projects_json,
-            "forests": forests_json,
-            "worktrees": serde_json::to_value(&rows).unwrap_or(Value::Null),
-        }),
-    ))
-}
-
-fn project_rows(layout: &Layout, project: &str) -> Result<Vec<Row>> {
-    let mut rows = Vec::new();
-    for w in worktrees(&layout.bare(project))? {
-        let forest = layout.forest_of(&w.path);
-        let dir = w.dir_name();
-        let row = Row {
-            project: project.to_string(),
+    let mut rows: Vec<Row> = all_worktrees(layout)?
+        .into_iter()
+        .map(|(project, w)| Row {
+            project,
             branch: w.branch,
-            dir,
-            forest,
+            forest: layout.forest_of(&w.path),
+            home: w.home,
             head: None,
             dirty: None,
             ahead: None,
@@ -195,11 +95,139 @@ fn project_rows(layout: &Layout, project: &str) -> Result<Vec<Row>> {
             missing: !w.path.is_dir(),
             path: w.path,
             error: None,
-        };
-        rows.push(row);
+        })
+        .collect();
+    let (projects, forests) = match name {
+        None => (layout.projects()?, layout.forests()?),
+        Some(n) => match locate(layout, Some(n), None)? {
+            Located::Forest { name, .. } => (vec![], vec![name]),
+            Located::Worktree { project, .. } => {
+                let mut forests: Vec<String> = rows
+                    .iter()
+                    .filter(|r| r.project == project)
+                    .filter_map(|r| r.forest.clone())
+                    .collect();
+                forests.sort();
+                forests.dedup();
+                (vec![project], forests)
+            }
+        },
+    };
+    // Keep only what is listed before running `git status` in each worktree.
+    rows.retain(|r| match &r.forest {
+        Some(f) => forests.contains(f),
+        None => projects.contains(&r.project),
+    });
+    for row in rows.iter_mut().filter(|r| !r.missing) {
+        fill_status(row);
     }
-    rows.sort_by(|a, b| (&a.forest, &a.dir).cmp(&(&b.forest, &b.dir)));
-    Ok(rows)
+    rows.sort_by(|a, b| (&a.forest, &a.project, &a.path).cmp(&(&b.forest, &b.project, &b.path)));
+
+    let mut text = String::new();
+    let mut repos_json = Vec::new();
+    let mut table = Vec::new();
+    for p in &projects {
+        let repo = layout.repo_dir(p);
+        let default = default_branch(&repo).ok();
+        let origin = origin_url(&repo);
+        match rows.iter().find(|r| r.home && &r.project == p) {
+            Some(r) => table.push(vec![
+                p.clone(),
+                r.branch_str().into(),
+                r.head_str().into(),
+                r.state(),
+            ]),
+            None => table.push(vec![p.clone(), "(no checkout)".into()]),
+        }
+        repos_json.push(json!({
+            "name": p,
+            "path": repo,
+            "default_branch": default,
+            "origin": origin,
+        }));
+    }
+    if !table.is_empty() {
+        text.push_str("repos\n");
+        text.push_str(&align(table, 2));
+    }
+
+    let mut forests_json = Vec::new();
+    let mut table = Vec::new();
+    for f in &forests {
+        let members: Vec<&Row> = rows
+            .iter()
+            .filter(|r| r.forest.as_ref() == Some(f))
+            .collect();
+        let branch = members.iter().find_map(|r| r.branch.clone());
+        if members.is_empty() {
+            table.push(vec![f.clone(), String::new(), "(no worktrees)".into()]);
+        }
+        for (i, r) in members.iter().enumerate() {
+            // The branch only when the name doesn't already say it.
+            let (name, shown) = if i == 0 {
+                let shown = match &branch {
+                    Some(b) if slug(b) == *f => String::new(),
+                    Some(b) => b.clone(),
+                    None => "(detached)".into(),
+                };
+                (f.clone(), shown)
+            } else {
+                (String::new(), String::new())
+            };
+            let mut state = r.state();
+            // Worktrees normally share the forest's branch; say so when one doesn't.
+            if r.branch != branch {
+                state = format!("{state}, on {}", r.branch_str());
+            }
+            table.push(vec![
+                name,
+                shown,
+                r.project.clone(),
+                r.head_str().into(),
+                state,
+            ]);
+        }
+        let names: Vec<&str> = members.iter().map(|r| r.project.as_str()).collect();
+        forests_json.push(json!({
+            "name": f,
+            "path": layout.forest_dir(f),
+            "branch": branch,
+            "projects": names,
+        }));
+    }
+    if !table.is_empty() {
+        text.push_str("forests\n");
+        text.push_str(&align(table, 2));
+    }
+
+    let table: Vec<Vec<String>> = rows
+        .iter()
+        .filter(|r| r.elsewhere())
+        .map(|r| {
+            vec![
+                r.project.clone(),
+                r.branch_str().into(),
+                r.path.display().to_string(),
+                r.state(),
+            ]
+        })
+        .collect();
+    if !table.is_empty() {
+        text.push_str("outside the layout\n");
+        text.push_str(&align(table, 2));
+    }
+    if projects.is_empty() && forests.is_empty() {
+        text.push_str(&format!("no repos in {}\n", layout.repos_dir().display()));
+    }
+
+    Ok(Output::new(
+        text,
+        json!({
+            "repos": repos_json,
+            "forests": forests_json,
+            "worktrees": serde_json::to_value(&rows).unwrap_or(Value::Null),
+        }),
+    ))
 }
 
 /// One `git status` per worktree gives head, upstream, ahead/behind and dirtiness.

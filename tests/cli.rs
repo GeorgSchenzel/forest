@@ -104,67 +104,67 @@ impl Env {
     }
 }
 
+/// The forest dir of `name`.
+fn forest_dir(e: &Env, name: &str) -> PathBuf {
+    e.root.join("forests").join(name)
+}
+
+fn has_branch(e: &Env, repo: &Path, b: &str) -> bool {
+    !e.git(repo, &["branch", "--list", b]).is_empty()
+}
+
 #[test]
-fn init_creates_unborn_default_worktree() {
+fn init_creates_a_repo() {
     let e = Env::new();
     let wt = e.ok(&["init", "app", "--branch", "trunk"]);
-    assert_eq!(PathBuf::from(&wt), e.root.join("app/trunk"));
-    assert!(e.root.join("app/.bare").is_dir());
+    assert_eq!(PathBuf::from(&wt), e.root.join("repos/app"));
+    assert!(e.root.join("repos/app/.git").is_dir());
 
     let ls = e.forest(&["ls", "--json"]).json();
     assert_eq!(ls["v"], 1);
+    assert_eq!(ls["repos"][0]["name"], "app");
+    assert_eq!(ls["worktrees"][0]["home"], true);
     assert_eq!(ls["worktrees"][0]["branch"], "trunk");
     assert_eq!(ls["worktrees"][0]["head"], Value::Null);
 
-    let r = e.forest(&["new", "app:feat/x"]);
+    let r = e.forest(&["new", "feat/x", "app"]);
     assert_eq!(r.code, 1);
     assert!(r.stderr.contains("no commits yet"), "{}", r.stderr);
+    assert!(!forest_dir(&e, "feat-x").exists());
 }
 
 #[test]
 fn init_rejects_bad_names() {
     let e = Env::new();
-    assert_eq!(e.forest(&["init", "_x"]).code, 1);
     assert_eq!(e.forest(&["init", ".x"]).code, 1);
-    fs::create_dir_all(e.root.join("_forests/shop")).unwrap();
-    assert_eq!(e.forest(&["init", "shop"]).code, 1);
+    assert_eq!(e.forest(&["init", "a:b"]).code, 1);
     e.ok(&["init", "app"]);
     assert_eq!(e.forest(&["init", "app"]).code, 1);
 }
 
 #[test]
-fn clone_sets_up_normal_remote_layout() {
+fn clone_makes_a_normal_clone() {
     let e = Env::new();
     let up = e.upstream("svc");
     e.git(&up, &["branch", "-m", "main", "develop"]);
     e.git(&up, &["branch", "feat/remote"]);
-    let wt = e.ok(&["clone", up.to_str().unwrap()]);
-    assert_eq!(PathBuf::from(&wt), e.root.join("svc/develop"));
-
-    let bare = e.root.join("svc/.bare");
+    let wt = PathBuf::from(e.ok(&["clone", up.to_str().unwrap()]));
+    assert_eq!(wt, e.root.join("repos/svc"));
+    assert_eq!(e.git(&wt, &["branch", "--show-current"]), "develop");
     assert_eq!(
-        e.git(&bare, &["symbolic-ref", "HEAD"]),
-        "refs/heads/develop"
-    );
-    assert_eq!(
-        e.git(&bare, &["symbolic-ref", "refs/remotes/origin/HEAD"]),
+        e.git(&wt, &["symbolic-ref", "refs/remotes/origin/HEAD"]),
         "refs/remotes/origin/develop"
     );
     // Only the default branch is local; the rest stays remote-tracking.
     assert_eq!(
-        e.git(&bare, &["branch", "--format=%(refname:short)"]),
+        e.git(&wt, &["branch", "--format=%(refname:short)"]),
         "develop"
     );
-    assert_eq!(
-        e.git(
-            &PathBuf::from(&wt),
-            &["rev-parse", "--abbrev-ref", "@{upstream}"]
-        ),
-        "origin/develop"
-    );
-    // Relative worktree paths.
-    let gitfile = fs::read_to_string(PathBuf::from(&wt).join(".git")).unwrap();
-    assert!(gitfile.contains("../.bare"), "{gitfile}");
+
+    // Worktrees link back with relative paths.
+    e.ok(&["new", "feat/remote", "svc"]);
+    let gitfile = fs::read_to_string(forest_dir(&e, "feat-remote").join("svc/.git")).unwrap();
+    assert!(gitfile.contains("../repos/svc/.git"), "{gitfile}");
 }
 
 #[test]
@@ -172,20 +172,21 @@ fn new_resolves_local_remote_and_new_branches() {
     let e = Env::new();
     let up = e.upstream("svc");
     e.git(&up, &["branch", "feat/remote"]);
-    e.ok(&["clone", up.to_str().unwrap()]);
-    let bare = e.root.join("svc/.bare");
+    let repo = PathBuf::from(e.ok(&["clone", up.to_str().unwrap()]));
 
     // Remote branch: tracking set up.
-    let wt = PathBuf::from(e.ok(&["new", "svc:feat/remote"]));
-    assert_eq!(wt, e.root.join("svc/feat-remote"));
+    let f = PathBuf::from(e.ok(&["new", "feat/remote", "svc"]));
+    assert_eq!(f, forest_dir(&e, "feat-remote"));
     assert_eq!(
-        e.git(&wt, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+        e.git(
+            &f.join("svc"),
+            &["rev-parse", "--abbrev-ref", "@{upstream}"]
+        ),
         "origin/feat/remote"
     );
 
     // New branch from the default branch, without an upstream.
-    let wt = PathBuf::from(e.ok(&["new", "svc:feat/new"]));
-    assert_eq!(wt, e.root.join("svc/feat-new"));
+    let wt = PathBuf::from(e.ok(&["new", "feat/new", "svc"])).join("svc");
     assert!(
         e.git(
             &wt,
@@ -200,22 +201,27 @@ fn new_resolves_local_remote_and_new_branches() {
 
     // New branch from --from.
     e.commit(&wt, "on new");
-    let wt2 = PathBuf::from(e.ok(&["new", "svc:feat/stacked", "--from", "feat/new"]));
-    assert_eq!(e.git(&wt2, &["log", "-1", "--format=%s"]), "on new");
+    let wt2 = PathBuf::from(e.ok(&["new", "feat/stacked", "svc", "--from", "feat/new"]));
+    assert_eq!(
+        e.git(&wt2.join("svc"), &["log", "-1", "--format=%s"]),
+        "on new"
+    );
 
     // Local branch without a worktree.
-    e.git(&bare, &["branch", "local-only", "feat/new"]);
-    let wt3 = PathBuf::from(e.ok(&["new", "svc:local-only"]));
-    assert_eq!(e.git(&wt3, &["log", "-1", "--format=%s"]), "on new");
+    e.git(&repo, &["branch", "local-only", "feat/new"]);
+    let wt3 = PathBuf::from(e.ok(&["new", "local-only", "svc"]));
+    assert_eq!(
+        e.git(&wt3.join("svc"), &["log", "-1", "--format=%s"]),
+        "on new"
+    );
 
-    // Unknown --from on a project is an error.
-    assert_eq!(e.forest(&["new", "svc:x", "--from", "nope"]).code, 1);
-    // So is --from for a branch that exists.
-    e.git(&bare, &["branch", "old", "feat/new"]);
-    let r = e.forest(&["new", "svc:old", "--from", "main"]);
+    // An unknown --from is an error, and so is --from for a branch that exists.
+    assert_eq!(e.forest(&["new", "x", "svc", "--from", "nope"]).code, 1);
+    assert!(!forest_dir(&e, "x").exists());
+    e.git(&repo, &["branch", "old", "feat/new"]);
+    let r = e.forest(&["new", "old", "svc", "--from", "main"]);
     assert_eq!(r.code, 1);
     assert!(r.stderr.contains("already exists locally"), "{}", r.stderr);
-    assert!(!e.root.join("svc/old").exists());
 }
 
 #[test]
@@ -223,203 +229,130 @@ fn new_reports_how_the_branch_was_set_up() {
     let e = Env::new();
     let up = e.upstream("svc");
     e.git(&up, &["branch", "feat/remote"]);
-    e.ok(&["clone", up.to_str().unwrap()]);
-    e.git(&e.root.join("svc/.bare"), &["branch", "local", "main"]);
+    let repo = PathBuf::from(e.ok(&["clone", up.to_str().unwrap()]));
+    e.git(&repo, &["branch", "local", "main"]);
 
     let cases = [
         (
-            "svc:feat/remote",
+            "feat/remote",
             "created branch feat/remote tracking origin/feat/remote",
             true,
             Value::from("origin/feat/remote"),
         ),
         (
-            "svc:feat/new",
+            "feat/new",
             "created branch feat/new from origin/main",
             true,
             Value::from("origin/main"),
         ),
-        ("svc:local", "checked out branch local", false, Value::Null),
+        ("local", "checked out branch local", false, Value::Null),
     ];
-    for (target, msg, created, from) in cases {
-        let r = e.forest(&["new", target, "--json"]);
+    for (branch, msg, created, from) in cases {
+        let r = e.forest(&["new", branch, "svc", "--json"]);
         assert_eq!(r.code, 0, "{}", r.stderr);
         assert!(r.stderr.contains(&format!("svc: {msg}")), "{}", r.stderr);
         let w = &r.json()["worktrees"][0];
-        assert_eq!(w["branch_created"], created, "{target}");
-        assert_eq!(w["from"], from, "{target}");
+        assert_eq!(w["branch_created"], created, "{branch}");
+        assert_eq!(w["from"], from, "{branch}");
     }
 }
 
 #[test]
-fn forest_members_are_worktrees() {
+fn new_adds_to_the_forest_of_its_branch() {
     let e = Env::new();
     e.project("api");
     e.project("web");
-    let wf = PathBuf::from(e.ok(&["new", "feat/y", "api", "web", "--name", "shop"]));
+    let f = forest_dir(&e, "feat-y");
 
-    // <project>:<branch> finds a worktree in a forest too.
-    let r = e.forest(&["path", "api:feat/y", "--json"]);
+    let r = e.forest(&["new", "feat/y", "api", "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
-    let j = r.json();
-    assert_eq!(j["kind"], "worktree");
-    assert_eq!(j["path"], wf.join("api").to_str().unwrap());
-    assert_eq!(j["forest"], "shop");
-    let r = e.forest_in(&e.root.join("api/main"), &["path", ":feat/y"]);
-    assert_eq!(r.stdout.trim(), wf.join("api").to_str().unwrap());
-
-    // Removing one member keeps the forest, the last one removes it.
-    e.ok(&["rm", "api:feat/y"]);
-    assert!(!wf.join("api").exists() && wf.join("web").exists());
-    let out = e.ok(&["rm", "web:feat/y"]);
-    assert!(out.ends_with(&format!("removed {}", wf.display())), "{out}");
-    assert!(!wf.exists());
-}
-
-#[test]
-fn new_only_creates() {
-    let e = Env::new();
-    e.project("app");
-    let a = e.ok(&["new", "app:feat/x"]);
-    let r = e.forest(&["new", "app:feat/x"]);
-    assert_eq!(r.code, 1);
-    assert!(r.stderr.contains("already exists"), "{}", r.stderr);
-    assert_eq!(e.ok(&["path", "app:feat-x"]), a);
-    assert_eq!(e.ok(&["path", "app:feat/x"]), a);
-}
-
-#[test]
-fn new_rejects_dir_collision_and_double_checkout() {
-    let e = Env::new();
-    e.project("app");
-    e.ok(&["new", "app:feat-x"]);
-    let r = e.forest(&["new", "app:feat/x"]);
-    assert_eq!(r.code, 1);
-    assert!(r.stderr.contains("already exists"), "{}", r.stderr);
-
-    let r = e.forest(&["new", "main", "app", "--name", "shop"]);
-    assert_eq!(r.code, 1);
-    assert!(r.stderr.contains("already checked out at"), "{}", r.stderr);
-    assert!(!e.root.join("_forests/shop").exists());
-}
-
-#[test]
-fn cwd_context() {
-    let e = Env::new();
-    let main = e.project("app");
-    let sub = main.join("deep/dir");
-    fs::create_dir_all(&sub).unwrap();
-
-    let r = e.forest_in(&sub, &["new", ":feat/x"]);
+    assert_eq!(r.json()["created"], true);
+    let r = e.forest(&["new", "feat/y", "web", "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
-    assert_eq!(r.stdout.trim(), e.root.join("app/feat-x").to_str().unwrap());
-
-    let r = e.forest_in(&sub, &["path"]);
-    assert_eq!(r.stdout.trim(), main.to_str().unwrap());
-
-    let r = e.forest_in(&e.root.join("app"), &["path"]);
-    assert_eq!(r.code, 1);
-
-    let r = e.forest_in(&e.base, &["path", ":feat/x"]);
-    assert_eq!(r.code, 1);
-    assert!(r.stderr.contains("needs a project"), "{}", r.stderr);
-    let r = e.forest_in(&e.base, &["new", "feat/y"]);
-    assert_eq!(r.code, 1);
-    assert!(r.stderr.contains("<project>:feat/y"), "{}", r.stderr);
-
-    // A bare word is always a forest, even inside a project; a branch takes a ':'.
-    e.ok(&["new", "app:both"]);
-    e.ok(&["new", "feat/b", "app", "--name", "both"]);
-    let r = e.forest_in(&sub, &["path", "both"]);
+    assert_eq!(r.json()["created"], false);
+    assert_eq!(r.json()["path"], f.to_str().unwrap());
     assert_eq!(
-        r.stdout.trim(),
-        e.root.join("_forests/both").to_str().unwrap()
+        e.git(&f.join("web"), &["branch", "--show-current"]),
+        "feat/y"
     );
-    let r = e.forest_in(&sub, &["path", ":both"]);
-    assert_eq!(r.stdout.trim(), e.root.join("app/both").to_str().unwrap());
 
-    // A bare word that is only a branch here hints at ':'.
-    let r = e.forest_in(&sub, &["path", "feat/x"]);
+    // A worktree that is there already: nothing changes.
+    let r = e.forest(&["new", "feat/y", "api"]);
     assert_eq!(r.code, 1);
-    assert!(r.stderr.contains("write ':feat/x'"), "{}", r.stderr);
+    assert!(r.stderr.contains("already exists"), "{}", r.stderr);
+    // --as only names a new forest.
+    let r = e.forest(&["new", "feat/y", "api", "--as", "other"]);
+    assert_eq!(r.code, 1);
+    assert!(
+        r.stderr.contains("in forest 'feat-y' already"),
+        "{}",
+        r.stderr
+    );
 }
 
 #[test]
-fn forest_new_is_all_or_nothing() {
+fn new_with_an_alias() {
+    let e = Env::new();
+    e.project("api");
+    e.project("web");
+    e.project("db");
+    let f = PathBuf::from(e.ok(&["new", "feat/auth", "api", "web", "--as", "tuna-auth"]));
+    assert_eq!(f, forest_dir(&e, "tuna-auth"));
+    assert_eq!(e.ok(&["path", "feat/auth"]), f.to_str().unwrap());
+    assert_eq!(e.ok(&["path", "tuna-auth"]), f.to_str().unwrap());
+    // Adding goes by branch.
+    e.ok(&["new", "feat/auth", "db"]);
+    assert!(f.join("db").is_dir());
+
+    // A name must not be taken by a dir, a repo, or the branch of a forest.
+    for (args, msg) in [
+        (
+            &["new", "b1", "api", "--as", "tuna-auth"][..],
+            "already exists",
+        ),
+        (&["new", "b2", "api", "--as", "web"], "name of a repo"),
+        (&["new", "b3", "api", "--as", "feat/auth"], "invalid name"),
+        (&["new", "b4", "api", "--as", "x"], ""),
+        (&["new", "b5", "web", "--as", "b4"], "branch of forest 'x'"),
+        (&["new", "web", "api"], "name of a repo"),
+    ] {
+        let r = e.forest(args);
+        if msg.is_empty() {
+            assert_eq!(r.code, 0, "{args:?}: {}", r.stderr);
+        } else {
+            assert_eq!(r.code, 1, "{args:?}");
+            assert!(r.stderr.contains(msg), "{args:?}: {}", r.stderr);
+        }
+    }
+}
+
+#[test]
+fn new_is_all_or_nothing() {
     let e = Env::new();
     e.project("api");
     e.project("web");
     e.ok(&["init", "empty"]); // unborn: can't branch
-    let api_bare = e.root.join("api/.bare");
-    e.git(&api_bare, &["branch", "feat/old", "main"]);
+    let api = e.root.join("repos/api");
+    let web = e.root.join("repos/web");
+    e.git(&api, &["branch", "feat/old", "main"]);
 
-    // One project fails: the others are rolled back, but an existing branch stays.
-    let r = e.forest(&["new", "feat/old", "web", "api", "empty", "--name", "shop"]);
+    // One repo fails: the others are rolled back, but an existing branch stays.
+    let r = e.forest(&["new", "feat/old", "web", "api", "empty"]);
     assert_eq!(r.code, 1);
     assert!(r.stderr.contains("nothing was created"), "{}", r.stderr);
-    assert!(!e.root.join("_forests/shop").exists());
-    assert!(
-        e.git(&e.root.join("web/.bare"), &["branch", "--list", "feat/old"])
-            .is_empty()
-    );
-    assert!(
-        !e.git(&api_bare, &["branch", "--list", "feat/old"])
-            .is_empty()
-    );
-    assert!(!e.git(&api_bare, &["worktree", "list"]).contains("_forests"));
+    assert!(!forest_dir(&e, "feat-old").exists());
+    assert!(!has_branch(&e, &web, "feat/old"));
+    assert!(has_branch(&e, &api, "feat/old"));
+    assert!(!e.git(&api, &["worktree", "list"]).contains("forests"));
 
-    // The name defaults to the branch.
-    let wf = e.root.join("_forests/shop");
-    let r = e.forest(&["new", "shop", "api", "web", "--json"]);
-    assert_eq!(r.code, 0, "{}", r.stderr);
-    let j = r.json();
-    assert_eq!(j["path"], wf.to_str().unwrap());
-    assert_eq!(j["branch"], "shop");
-    assert_eq!(j["worktrees"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        e.git(&wf.join("web"), &["branch", "--show-current"]),
-        "shop"
-    );
-
-    // An existing forest is never changed by new.
-    let r = e.forest(&["new", "shop", "empty"]);
+    // Adding to an existing forest fails the same way, and keeps the forest.
+    let f = PathBuf::from(e.ok(&["new", "feat/z", "api"]));
+    let r = e.forest(&["new", "feat/z", "web", "empty"]);
     assert_eq!(r.code, 1);
-    assert!(r.stderr.contains("already exists"), "{}", r.stderr);
-    assert!(!wf.join("empty").exists());
+    assert!(f.join("api").is_dir() && !f.join("web").exists());
 
-    // Inside a forest, path means the whole forest.
-    let r = e.forest_in(&wf.join("web"), &["path"]);
-    assert_eq!(r.stdout.trim(), wf.to_str().unwrap());
-
-    // --from is used in each project.
-    e.commit(&wf.join("api"), "api work");
-    e.ok(&[
-        "new", "feat/z", "api", "web", "--from", "shop", "--name", "z",
-    ]);
-    let z = e.root.join("_forests/z");
-    assert_eq!(
-        e.git(&z.join("api"), &["log", "-1", "--format=%s"]),
-        "api work"
-    );
-    assert_eq!(
-        e.git(&z.join("web"), &["log", "-1", "--format=%s"]),
-        "first"
-    );
-
-    let ls = e.forest(&["ls", "api", "--json"]).json();
-    let forests: Vec<_> = ls["worktrees"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|w| w["forest"].clone())
-        .collect();
-    assert!(forests.contains(&Value::from("shop")));
-    assert!(forests.contains(&Value::Null));
-    let out = e.ok(&["ls", "z"]);
-    assert!(out.starts_with("z  feat/z\n  api "), "{out}");
-
-    // A --from missing in any project fails the whole forest.
-    e.git(&api_bare, &["branch", "only-api", "main"]);
+    // A --from missing in any repo fails the whole forest.
+    e.git(&api, &["branch", "only-api", "main"]);
     let r = e.forest(&["new", "feat/w", "api", "web", "--from", "only-api"]);
     assert_eq!(r.code, 1);
     assert!(
@@ -427,37 +360,76 @@ fn forest_new_is_all_or_nothing() {
         "{}",
         r.stderr
     );
-    assert!(!e.root.join("_forests/feat-w").exists());
-    assert!(e.git(&api_bare, &["branch", "--list", "feat/w"]).is_empty());
+    assert!(!forest_dir(&e, "feat-w").exists());
+    assert!(!has_branch(&e, &api, "feat/w"));
+
+    // A branch checked out in a repo's home can't go into a forest.
+    let r = e.forest(&["new", "main", "api"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("already checked out at"), "{}", r.stderr);
+    assert!(!forest_dir(&e, "main").exists());
+
+    // Usage: at least one repo.
+    assert_eq!(e.forest(&["new", "feat/q"]).code, 1);
 }
 
 #[test]
-fn forest_names_are_checked() {
+fn targets() {
+    let e = Env::new();
+    let api = e.project("api");
+    e.project("web");
+    let f = PathBuf::from(e.ok(&["new", "feat/y", "api", "web", "--as", "shop"]));
+    let s = |p: &Path| p.to_str().unwrap().to_string();
+
+    assert_eq!(e.ok(&["path", "shop"]), s(&f));
+    assert_eq!(e.ok(&["path", "feat/y"]), s(&f));
+    assert_eq!(e.ok(&["path", "shop", "api"]), s(&f.join("api")));
+    assert_eq!(e.ok(&["path", "feat/y", "web"]), s(&f.join("web")));
+    assert_eq!(e.ok(&["path", "api"]), s(&api));
+    assert_eq!(e.ok(&["path", "main", "api"]), s(&api));
+
+    let r = e.forest(&["path", "nope"]);
+    assert_eq!(r.code, 1);
+    assert!(
+        r.stderr.contains("no forest, branch or repo"),
+        "{}",
+        r.stderr
+    );
+    let r = e.forest(&["path", "shop", "nope"]);
+    assert!(r.stderr.contains("no repo named 'nope'"), "{}", r.stderr);
+    e.project("db");
+    let r = e.forest(&["path", "shop", "db"]);
+    assert!(r.stderr.contains("has no worktree of db"), "{}", r.stderr);
+
+    // A word that names two forests is an error, never a guess.
+    e.ok(&["new", "x", "db", "--as", "other"]);
+    fs::create_dir_all(forest_dir(&e, "x")).unwrap();
+    let r = e.forest(&["path", "x"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("ambiguous"), "{}", r.stderr);
+
+    // Without a target: the forest or repo cwd is in.
+    let deep = f.join("api/deep");
+    fs::create_dir_all(&deep).unwrap();
+    assert_eq!(e.forest_in(&deep, &["path"]).stdout.trim(), s(&f));
+    assert_eq!(e.forest_in(&f, &["path"]).stdout.trim(), s(&f));
+    let sub = api.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    assert_eq!(e.forest_in(&sub, &["path"]).stdout.trim(), s(&api));
+    let r = e.forest_in(&e.base, &["path"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("give a target"), "{}", r.stderr);
+}
+
+#[test]
+fn rm_refuses_dirty_worktrees() {
     let e = Env::new();
     e.project("app");
-    let r = e.forest(&["new", "app", "app"]);
-    assert_eq!(r.code, 1);
-    assert!(r.stderr.contains("can't share its name"), "{}", r.stderr);
-    assert_eq!(e.forest(&["new", "a:b", "app"]).code, 1);
-    assert_eq!(e.forest(&["new", "x", "nope"]).code, 1);
-    assert_eq!(e.forest(&["new", "app:x", "--name", "y"]).code, 1);
-    e.ok(&["new", "feat/s", "app", "--name", "shop"]);
-    assert_eq!(e.forest(&["init", "shop"]).code, 1);
-    // Without --name, the forest is named after the branch's dir name.
-    assert_eq!(
-        e.ok(&["new", "feat/t", "app"]),
-        e.root.join("_forests/feat-t").to_str().unwrap()
-    );
-}
-
-#[test]
-fn rm_refuses_dirty_and_default_worktrees() {
-    let e = Env::new();
-    let main = e.project("app");
-    let x = PathBuf::from(e.ok(&["new", "app:feat/x"]));
+    let f = PathBuf::from(e.ok(&["new", "feat/x", "app"]));
+    let x = f.join("app");
     fs::write(x.join("new.txt"), "x").unwrap();
 
-    let r = e.forest(&["rm", "app:feat/x", "--json"]);
+    let r = e.forest(&["rm", "feat/x", "--json"]);
     assert_eq!(r.code, 2);
     assert_eq!(r.json()["error"]["code"], "refused");
     assert!(x.exists());
@@ -468,128 +440,97 @@ fn rm_refuses_dirty_and_default_worktrees() {
     e.git(&x, &["add", ".gitignore"]);
     e.commit(&x, "ignore");
     fs::write(x.join("a.log"), "x").unwrap();
-    e.ok(&["rm", "app:feat/x"]);
-    assert!(!x.exists());
+    e.ok(&["rm", "feat/x"]);
+    assert!(!f.exists());
     // The branch is kept.
-    e.git(
-        &e.root.join("app/.bare"),
-        &["rev-parse", "--verify", "feat/x"],
-    );
-
-    assert_eq!(e.forest(&["rm", "app:main"]).code, 2);
-    e.ok(&["rm", "app:main", "--force"]);
-    assert!(!main.exists());
+    assert!(has_branch(&e, &e.root.join("repos/app"), "feat/x"));
 }
 
 #[test]
-fn rm_delete_branch_safety() {
+fn rm_one_worktree_of_a_forest() {
+    let e = Env::new();
+    e.project("api");
+    e.project("web");
+    let f = PathBuf::from(e.ok(&["new", "feat/y", "api", "web"]));
+
+    let r = e.forest(&["rm", "feat/y", "api", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let j = r.json();
+    assert_eq!(j["kind"], "worktree");
+    assert_eq!(j["forest"], "feat-y");
+    assert!(!f.join("api").exists() && f.join("web").exists());
+
+    // The forest goes with its last worktree.
+    let out = e.ok(&["rm", "feat-y", "web"]);
+    assert!(out.ends_with(&format!("removed {}", f.display())), "{out}");
+    assert!(!f.exists());
+}
+
+#[test]
+fn rm_never_removes_a_home() {
+    let e = Env::new();
+    let app = e.project("app");
+    for args in [&["rm", "app"][..], &["rm", "main", "app", "--force"]] {
+        let r = e.forest(args);
+        assert_eq!(r.code, 1, "{args:?}");
+        assert!(r.stderr.contains("is the home of app"), "{}", r.stderr);
+    }
+    let r = e.forest_in(&app, &["rm"]);
+    assert_eq!(r.code, 1);
+    assert!(app.join(".git").is_dir());
+}
+
+#[test]
+fn rm_delete_branch_never_loses_commits() {
     let e = Env::new();
     let up = e.upstream("svc");
-    e.ok(&["clone", up.to_str().unwrap()]);
-    let bare = e.root.join("svc/.bare");
-    let has_branch = |b: &str| !e.git(&bare, &["branch", "--list", b]).is_empty();
+    let repo = PathBuf::from(e.ok(&["clone", up.to_str().unwrap()]));
 
     // Unpushed commits: refused.
-    let a = PathBuf::from(e.ok(&["new", "svc:feat/a"]));
+    let a = PathBuf::from(e.ok(&["new", "feat/a", "svc"])).join("svc");
     e.commit(&a, "unpushed");
-    assert_eq!(e.forest(&["rm", "svc:feat/a", "--delete-branch"]).code, 2);
+    assert_eq!(e.forest(&["rm", "feat/a", "--delete-branch"]).code, 2);
     assert!(a.exists());
 
-    // Nothing beyond main: safe.
-    e.ok(&["new", "svc:feat/b"]);
-    e.ok(&["rm", "svc:feat/b", "--delete-branch"]);
-    assert!(!has_branch("feat/b"));
+    // Nothing beyond main: deleted.
+    e.ok(&["new", "feat/b", "svc"]);
+    e.ok(&["rm", "feat/b", "--delete-branch"]);
+    assert!(!has_branch(&e, &repo, "feat/b"));
 
-    // Upstream gone after a squash merge: safe.
+    // Upstream gone, but with a commit that was never pushed: refused.
     e.git(&up, &["branch", "feat/c"]);
-    let c = PathBuf::from(e.ok(&["new", "svc:feat/c"]));
-    e.commit(&c, "squashed upstream");
+    let c = PathBuf::from(e.ok(&["new", "feat/c", "svc"])).join("svc");
+    e.commit(&c, "never pushed");
     e.git(&up, &["branch", "-D", "feat/c"]);
-    e.ok(&["new", "svc:feat/d"]); // fetches with --prune
-    let ls = e.forest(&["ls", "svc", "--json"]).json();
-    let row = ls["worktrees"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|w| w["branch"] == "feat/c")
-        .unwrap()
-        .clone();
-    assert_eq!(row["upstream_gone"], true);
-    e.ok(&["rm", "svc:feat/c", "--delete-branch"]);
-    assert!(!has_branch("feat/c"));
+    e.git(&repo, &["fetch", "-q", "--prune"]);
+    assert_eq!(e.forest(&["rm", "feat/c", "--delete-branch"]).code, 2);
+    // Upstream gone after a real merge: everything is on main, so deleted.
+    e.git(&up, &["branch", "feat/d"]);
+    e.ok(&["new", "feat/d", "svc"]);
+    e.git(&up, &["branch", "-D", "feat/d"]);
+    e.git(&repo, &["fetch", "-q", "--prune"]);
+    e.ok(&["rm", "feat/d", "--delete-branch"]);
+    assert!(!has_branch(&e, &repo, "feat/d"));
 
-    // --force overrides.
-    e.ok(&["rm", "svc:feat/a", "--delete-branch", "--force"]);
-    assert!(!has_branch("feat/a"));
-}
-
-#[test]
-fn forest_rm_is_all_or_nothing() {
-    let e = Env::new();
-    e.project("api");
-    e.project("web");
-    let wf = PathBuf::from(e.ok(&["new", "shop", "api", "web"]));
-    fs::write(wf.join("web/dirty"), "x").unwrap();
-
-    let r = e.forest_in(&wf.join("api"), &["rm"]);
+    // --force overrides, except for the default branch.
+    e.ok(&["rm", "feat/a", "--delete-branch", "--force"]);
+    assert!(!has_branch(&e, &repo, "feat/a"));
+    e.git(&repo, &["checkout", "-q", "-b", "elsewhere"]);
+    e.ok(&["new", "main", "svc"]);
+    let r = e.forest(&["rm", "main", "svc", "--delete-branch", "--force"]);
     assert_eq!(r.code, 2);
-    assert!(wf.join("api").exists() && wf.join("web").exists());
-
-    fs::remove_file(wf.join("web/dirty")).unwrap();
-    let r = e.forest_in(&wf.join("api"), &["rm"]);
-    assert_eq!(r.code, 0, "{}", r.stderr);
-    assert!(!wf.exists());
+    assert!(r.stderr.contains("never deleted"), "{}", r.stderr);
 }
 
 #[test]
-fn prune_reports_orphans() {
-    let e = Env::new();
-    e.project("app");
-    let x = PathBuf::from(e.ok(&["new", "app:feat/x"]));
-    fs::rename(&x, e.root.join("app/moved")).unwrap();
-    fs::create_dir_all(e.root.join("app/junk")).unwrap();
-
-    let j = e.forest(&["prune", "--json"]).json();
-    assert_eq!(j["pruned"][0]["project"], "app");
-    let orphans: Vec<_> = j["orphans"].as_array().unwrap().to_vec();
-    assert!(orphans.contains(&Value::from(e.root.join("app/junk").to_str().unwrap())));
-    assert!(orphans.contains(&Value::from(e.root.join("app/moved").to_str().unwrap())));
-}
-
-#[test]
-fn ls_human_and_usage_errors() {
-    let e = Env::new();
-    e.project("app");
-    e.ok(&["new", "app:feat/x"]);
-    let out = e.ok(&["ls"]);
-    assert!(out.starts_with("app  (default: main, no origin)"), "{out}");
-    assert!(out.contains("feat-x  feat/x"), "{out}");
-
-    // Usage errors are 1, never 2 (which means "refused").
-    assert_eq!(e.forest(&["bogus"]).code, 1);
-    assert_eq!(e.forest(&["--help"]).code, 0);
-}
-
-#[test]
-fn new_recreates_a_deleted_worktree() {
-    let e = Env::new();
-    e.project("app");
-    let x = PathBuf::from(e.ok(&["new", "app:feat/x"]));
-    fs::remove_dir_all(&x).unwrap();
-    let r = e.forest(&["new", "app:feat/x", "--json"]);
-    assert_eq!(r.code, 0, "{}", r.stderr);
-    assert!(x.join(".git").exists());
-}
-
-#[test]
-fn forest_rm_finds_missing_members_and_keeps_strays() {
+fn rm_finds_missing_worktrees_and_keeps_strays() {
     let e = Env::new();
     e.project("api");
     e.project("web");
-    let wf = PathBuf::from(e.ok(&["new", "feat/y", "api", "web", "--name", "shop"]));
-    fs::remove_dir_all(wf.join("web")).unwrap();
-    fs::create_dir_all(wf.join("notes")).unwrap();
-    fs::write(wf.join("notes/todo"), "x").unwrap();
+    let f = PathBuf::from(e.ok(&["new", "feat/y", "api", "web", "--as", "shop"]));
+    fs::remove_dir_all(f.join("web")).unwrap();
+    fs::create_dir_all(f.join("notes")).unwrap();
+    fs::write(f.join("notes/todo"), "x").unwrap();
 
     // The stray dir refuses without --force.
     assert_eq!(e.forest(&["rm", "shop"]).code, 2);
@@ -600,72 +541,196 @@ fn forest_rm_finds_missing_members_and_keeps_strays() {
     let j = r.json();
     assert_eq!(j["removed"].as_array().unwrap().len(), 2);
     assert_eq!(j["errors"].as_array().unwrap().len(), 1);
-    assert!(wf.join("notes/todo").exists());
-    assert!(!wf.join("api").exists());
-    let web_bare = e.root.join("web/.bare");
-    assert!(e.git(&web_bare, &["branch", "--list", "feat/y"]).is_empty());
-    assert!(!e.git(&web_bare, &["worktree", "list"]).contains("shop"));
-
-    // Nothing still holds the branch, so a forest on it can be made again.
-    e.ok(&["new", "feat/y", "api", "web", "--name", "shop2"]);
+    assert!(f.join("notes/todo").exists());
+    assert!(!f.join("api").exists());
+    let web = e.root.join("repos/web");
+    assert!(!has_branch(&e, &web, "feat/y"));
+    assert!(!e.git(&web, &["worktree", "list"]).contains("shop"));
 }
 
 #[test]
-fn target_prefers_branch_over_dir_name() {
+fn rm_warns_when_cwd_is_inside_the_target() {
     let e = Env::new();
     e.project("app");
-    let bare = e.root.join("app/.bare");
-    let b = e.root.join("app/b");
-    let a = e.root.join("app/a");
-    e.git(
-        &bare,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "c",
-            b.to_str().unwrap(),
-            "main",
-        ],
+    let f = PathBuf::from(e.ok(&["new", "feat/x", "app"]));
+    let r = e.forest_in(&f.join("app"), &["rm"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("warning: the current directory"),
+        "{}",
+        r.stderr
     );
-    e.git(
-        &bare,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "b",
-            a.to_str().unwrap(),
-            "main",
-        ],
-    );
-    assert_eq!(e.ok(&["path", "app:b"]), a.to_str().unwrap());
-    // A dir name still works when no branch has that name.
-    e.git(
-        &bare,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "feat/d",
-            e.root.join("app/d").to_str().unwrap(),
-            "main",
-        ],
-    );
+
+    let f = PathBuf::from(e.ok(&["new", "feat/x", "app"]));
+    let r = e.forest_in(&f, &["rm", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(!r.stderr.contains("warning"), "{}", r.stderr);
+    assert_eq!(r.json()["warnings"].as_array().unwrap().len(), 1);
+    assert!(!f.exists());
+
+    // Not inside: no warning.
+    e.ok(&["new", "feat/x", "app"]);
+    let r = e.forest(&["rm", "feat/x"]);
+    assert!(!r.stderr.contains("warning"), "{}", r.stderr);
+}
+
+#[test]
+fn mv_renames_a_forest() {
+    let e = Env::new();
+    e.project("api");
+    e.project("web");
+    let old = PathBuf::from(e.ok(&["new", "feat/a", "api", "web"]));
+    let shop = forest_dir(&e, "shop");
+
+    let r = e.forest(&["mv", "feat/a", "shop", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.json()["renamed_from"], "feat-a");
+    assert!(!old.exists());
+    // git follows: the worktrees work, and are found where they are now.
     assert_eq!(
-        e.ok(&["path", "app:d"]),
-        e.root.join("app/d").to_str().unwrap()
+        e.git(&shop.join("web"), &["branch", "--show-current"]),
+        "feat/a"
     );
+    assert!(
+        e.git(&e.root.join("repos/api"), &["worktree", "list"])
+            .contains("forests/shop/api")
+    );
+    assert_eq!(e.ok(&["path", "feat/a"]), shop.to_str().unwrap());
+    e.ok(&["rm", "shop", "web"]);
+
+    assert_eq!(e.forest(&["mv", "shop", "api"]).code, 1);
+    e.ok(&["new", "feat/b", "web"]);
+    assert_eq!(e.forest(&["mv", "shop", "feat-b"]).code, 1);
+    assert_eq!(e.forest(&["mv", "api", "x"]).code, 1);
+    // Back to its branch's name.
+    e.ok(&["mv", "shop", "feat-a"]);
+    assert!(old.join("api").is_dir());
+}
+
+#[test]
+fn clean_removes_only_finished_forests() {
+    let e = Env::new();
+    let up = e.upstream("svc");
+    let repo = PathBuf::from(e.ok(&["clone", up.to_str().unwrap()]));
+    let wt = |b: &str| PathBuf::from(e.ok(&["new", b, "svc"])).join("svc");
+
+    // Merged into main: done.
+    let m = wt("feat/merged");
+    e.commit(&m, "merged work");
+    e.git(&repo, &["merge", "-q", "--ff-only", "feat/merged"]);
+    // Just made, nothing done yet: kept, though main has all of it.
+    wt("feat/fresh");
+    // Merged, but with uncommitted changes: kept.
+    let d = wt("feat/dirty");
+    e.commit(&d, "dirty work");
+    e.git(&repo, &["merge", "-q", "--no-edit", "feat/dirty"]);
+    fs::write(d.join("notes"), "x").unwrap();
+    // Upstream gone with a commit never pushed (a squash merge, say): done, but its
+    // branch must stay.
+    e.git(&up, &["branch", "feat/gone"]);
+    let g = wt("feat/gone");
+    e.commit(&g, "squashed");
+    e.git(&up, &["branch", "-D", "feat/gone"]);
+    e.git(&repo, &["fetch", "-q", "--prune"]);
+    // Unmerged work: kept.
+    let u = wt("feat/open");
+    e.commit(&u, "open work");
+
+    let r = e.forest(&["clean", "--dry-run", "--delete-branch", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let j = r.json();
+    let names = |k: &str| -> Vec<String> {
+        j[k].as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["forest"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(names("removed"), ["feat-gone", "feat-merged"]);
+    assert_eq!(names("kept"), ["feat-dirty", "feat-fresh", "feat-open"]);
+    assert!(forest_dir(&e, "feat-merged").exists());
+
+    let out = e.ok(&["clean", "--delete-branch"]);
+    assert!(out.contains("deleted branch feat/merged of svc"), "{out}");
+    assert!(
+        out.contains("kept branch feat/gone of svc: 1 commits"),
+        "{out}"
+    );
+    assert!(!forest_dir(&e, "feat-merged").exists());
+    assert!(!forest_dir(&e, "feat-gone").exists());
+    assert!(!has_branch(&e, &repo, "feat/merged"));
+    assert!(has_branch(&e, &repo, "feat/gone"));
+    for f in ["feat-dirty", "feat-fresh", "feat-open"] {
+        assert!(forest_dir(&e, f).exists(), "{f}");
+    }
+}
+
+#[test]
+fn prune_reports_orphans() {
+    let e = Env::new();
+    e.project("app");
+    let f = PathBuf::from(e.ok(&["new", "feat/x", "app"]));
+    fs::rename(f.join("app"), f.join("moved")).unwrap();
+    let empty = forest_dir(&e, "leftover");
+    fs::create_dir_all(&empty).unwrap();
+
+    let j = e.forest(&["prune", "--json"]).json();
+    assert_eq!(j["pruned"][0]["project"], "app");
+    let orphans: Vec<_> = j["orphans"].as_array().unwrap().to_vec();
+    assert!(orphans.contains(&Value::from(f.join("moved").to_str().unwrap())));
+    assert!(orphans.contains(&Value::from(empty.to_str().unwrap())));
+}
+
+#[test]
+fn ls_shows_repos_forests_and_the_rest() {
+    let e = Env::new();
+    let app = e.project("app");
+    e.project("lib");
+    e.ok(&["new", "feat/x", "app", "lib", "--as", "both"]);
+    e.ok(&["new", "feat/y", "lib"]);
+    let outside = e.base.join("outside");
+    e.git(
+        &app,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "tmp",
+            outside.to_str().unwrap(),
+        ],
+    );
+
+    let out = e.ok(&["ls"]);
+    assert!(out.starts_with("repos\n  app  main"), "{out}");
+    assert!(out.contains("forests\n  both    feat/x  app"), "{out}");
+    assert!(out.contains("\n  feat-y          lib"), "{out}");
+    assert!(out.contains("outside the layout\n  app  tmp"), "{out}");
+
+    // One repo: its home, the forests it is in, and its other worktrees.
+    let j = e.forest(&["ls", "app", "--json"]).json();
+    assert_eq!(j["repos"].as_array().unwrap().len(), 1);
+    assert_eq!(j["forests"][0]["name"], "both");
+    assert_eq!(
+        j["forests"][0]["projects"],
+        serde_json::json!(["app", "lib"])
+    );
+    assert_eq!(j["worktrees"].as_array().unwrap().len(), 4);
+    // One forest, by branch.
+    let j = e.forest(&["ls", "feat/y", "--json"]).json();
+    assert_eq!(j["repos"].as_array().unwrap().len(), 0);
+    assert_eq!(j["forests"][0]["name"], "feat-y");
+
+    // Usage errors are 1, never 2 (which means "refused").
+    assert_eq!(e.forest(&["bogus"]).code, 1);
+    assert_eq!(e.forest(&["--help"]).code, 0);
 }
 
 #[test]
 fn ls_survives_a_broken_worktree() {
     let e = Env::new();
     e.project("app");
-    let x = PathBuf::from(e.ok(&["new", "app:feat/x"]));
+    let x = PathBuf::from(e.ok(&["new", "feat/x", "app"])).join("app");
     fs::write(x.join(".git"), "gitdir: /nonexistent\n").unwrap();
     let r = e.forest(&["ls", "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
@@ -679,31 +744,30 @@ fn ls_survives_a_broken_worktree() {
 }
 
 #[test]
-fn prune_reports_forest_without_worktrees() {
+fn new_recreates_a_deleted_worktree() {
     let e = Env::new();
-    e.project("api");
-    let leftover = e.root.join("_forests/shop");
-    fs::create_dir_all(&leftover).unwrap();
-    fs::write(leftover.join(".envrc"), "x").unwrap();
-    let j = e.forest(&["prune", "--json"]).json();
-    assert_eq!(j["orphans"][0], leftover.to_str().unwrap());
+    e.project("app");
+    let f = PathBuf::from(e.ok(&["new", "feat/x", "app"]));
+    fs::remove_dir_all(f.join("app")).unwrap();
+    let r = e.forest(&["new", "feat/x", "app", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(f.join("app/.git").exists());
 }
 
-fn identity(kind: &str, name: &str, dir: &str, branch: Value, path: &Path) -> Value {
+fn identity(kind: &str, forest: Value, project: Value, branch: Value, path: &Path) -> Value {
     serde_json::json!({
         "v": 1,
         "kind": kind,
-        "name": name,
-        "dir": dir,
+        "forest": forest,
+        "project": project,
         "branch": branch,
         "path": path.to_str().unwrap(),
-        "forest": null,
     })
 }
 
 /// The identity fields of a JSON result, in order, without the command's own fields.
 fn identity_of(j: &Value) -> Value {
-    let keys = ["v", "kind", "name", "dir", "branch", "path", "forest"];
+    let keys = ["v", "kind", "forest", "project", "branch", "path"];
     let obj = j.as_object().unwrap();
     let got: Vec<_> = obj.keys().take(keys.len()).map(String::as_str).collect();
     assert_eq!(got, keys, "{j}");
@@ -716,62 +780,25 @@ fn identity_of(j: &Value) -> Value {
 }
 
 #[test]
-fn json_identity_of_a_worktree() {
-    let e = Env::new();
-    e.project("app");
-    let x = e.root.join("app/feat-x");
-    let want = identity("worktree", "app", "feat-x", "feat/x".into(), &x);
-
-    let r = e.forest(&["new", "app:feat/x", "--json"]);
-    assert_eq!(r.code, 0, "{}", r.stderr);
-    let j = r.json();
-    assert_eq!(identity_of(&j), want);
-
-    let deep = x.join("deep");
-    fs::create_dir_all(&deep).unwrap();
-    let runs = [
-        e.forest(&["path", "app:feat/x", "--json"]),
-        e.forest(&["path", "app:feat-x", "--json"]),
-        e.forest_in(&e.root.join("app/main"), &["path", ":feat/x", "--json"]),
-        e.forest_in(&e.root.join("app"), &["path", ":feat-x", "--json"]),
-        e.forest_in(&x, &["path", "--json"]),
-        e.forest_in(&deep, &["path", "--json"]),
-    ];
-    for r in &runs {
-        assert_eq!(r.code, 0, "{}", r.stderr);
-        assert_eq!(r.json(), want, "{}", r.stdout);
-    }
-    fs::remove_dir(&deep).unwrap();
-
-    let r = e.forest(&["rm", "app:feat/x", "--json"]);
-    assert_eq!(r.code, 0, "{}", r.stderr);
-    let j = r.json();
-    assert_eq!(identity_of(&j), want);
-    assert_eq!(j["removed"][0]["path"], x.to_str().unwrap());
-    assert!(j.get("warnings").is_none(), "{j}");
-}
-
-#[test]
 fn json_identity_of_a_forest() {
     let e = Env::new();
     e.project("api");
     e.project("web");
-    let wf = e.root.join("_forests/shop");
-    let want = identity("forest", "shop", "shop", "feat/y".into(), &wf);
+    let f = forest_dir(&e, "shop");
+    let want = identity("forest", "shop".into(), Value::Null, "feat/y".into(), &f);
 
-    let r = e.forest(&["new", "feat/y", "api", "web", "--name", "shop", "--json"]);
+    let r = e.forest(&["new", "feat/y", "api", "web", "--as", "shop", "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
     let j = r.json();
     assert_eq!(identity_of(&j), want);
     assert_eq!(j["worktrees"].as_array().unwrap().len(), 2);
 
-    let runs = [
+    for r in [
         e.forest(&["path", "shop", "--json"]),
-        e.forest_in(&e.root.join("api/main"), &["path", "shop", "--json"]),
-        e.forest_in(&wf, &["path", "--json"]),
-        e.forest_in(&wf.join("web"), &["path", "--json"]),
-    ];
-    for r in &runs {
+        e.forest(&["path", "feat/y", "--json"]),
+        e.forest_in(&f, &["path", "--json"]),
+        e.forest_in(&f.join("web"), &["path", "--json"]),
+    ] {
         assert_eq!(r.code, 0, "{}", r.stderr);
         assert_eq!(r.json(), want, "{}", r.stdout);
     }
@@ -781,24 +808,49 @@ fn json_identity_of_a_forest() {
     let j = r.json();
     assert_eq!(identity_of(&j), want);
     assert_eq!(j["removed"].as_array().unwrap().len(), 2);
-    assert!(!wf.exists());
+    assert!(!f.exists());
+}
+
+#[test]
+fn json_identity_of_worktrees() {
+    let e = Env::new();
+    let api = e.project("api");
+    let f = PathBuf::from(e.ok(&["new", "feat/y", "api"]));
+    let member = identity(
+        "worktree",
+        "feat-y".into(),
+        "api".into(),
+        "feat/y".into(),
+        &f.join("api"),
+    );
+    for args in [&["path", "feat-y", "api"][..], &["path", "feat/y", "api"]] {
+        let mut args = args.to_vec();
+        args.push("--json");
+        assert_eq!(e.forest(&args).json(), member, "{args:?}");
+    }
+    let home = identity("worktree", Value::Null, "api".into(), "main".into(), &api);
+    for r in [
+        e.forest(&["path", "api", "--json"]),
+        e.forest(&["path", "main", "api", "--json"]),
+        e.forest_in(&api, &["path", "--json"]),
+    ] {
+        assert_eq!(r.json(), home, "{}", r.stdout);
+    }
 }
 
 #[test]
 fn json_identity_of_a_forest_without_a_branch() {
     let e = Env::new();
-    e.project("api");
-    let wf = e.root.join("_forests/shop");
-    fs::create_dir_all(&wf).unwrap();
-    let want = identity("forest", "shop", "shop", Value::Null, &wf);
+    let api = e.project("api");
+    let f = forest_dir(&e, "shop");
+    fs::create_dir_all(&f).unwrap();
+    let want = identity("forest", "shop".into(), Value::Null, Value::Null, &f);
     assert_eq!(e.forest(&["path", "shop", "--json"]).json(), want);
-    assert_eq!(e.forest_in(&wf, &["path", "--json"]).json(), want);
 
-    // A detached member doesn't give it a branch either.
-    let bare = e.root.join("api/.bare");
-    let member = wf.join("api");
+    // A detached worktree doesn't give it a branch either.
+    let member = f.join("api");
     e.git(
-        &bare,
+        &api,
         &[
             "worktree",
             "add",
@@ -815,13 +867,13 @@ fn json_identity_of_a_forest_without_a_branch() {
 }
 
 #[test]
-fn json_errors_are_unchanged() {
+fn json_errors() {
     let e = Env::new();
     e.project("app");
     for args in [
-        &["path", "app:nope", "--json"][..],
-        &["rm", "app:nope", "--json"],
-        &["new", "nope:x", "--json"],
+        &["path", "nope", "--json"][..],
+        &["rm", "nope", "--json"],
+        &["new", "x", "nope", "--json"],
     ] {
         let r = e.forest(args);
         assert_eq!(r.code, 1);
@@ -831,51 +883,20 @@ fn json_errors_are_unchanged() {
         assert_eq!(j["error"]["code"], "error");
         assert!(j["error"]["message"].is_string());
     }
-    let r = e.forest(&["rm", "app:main", "--json"]);
+    let f = PathBuf::from(e.ok(&["new", "feat/x", "app"]));
+    fs::write(f.join("app/dirty"), "x").unwrap();
+    let r = e.forest(&["rm", "feat/x", "--json"]);
     assert_eq!(r.code, 2);
     assert_eq!(r.json()["error"]["code"], "refused");
 }
 
 #[test]
-fn rm_warns_when_cwd_is_inside_the_target() {
+fn migrate_a_clone_moves_it_and_its_worktrees() {
     let e = Env::new();
-    e.project("app");
-    let x = PathBuf::from(e.ok(&["new", "app:feat/x"]));
-    let r = e.forest_in(&x, &["rm"]);
-    assert_eq!(r.code, 0, "{}", r.stderr);
-    assert!(
-        r.stderr.contains("warning: the current directory"),
-        "{}",
-        r.stderr
-    );
-
-    let x = PathBuf::from(e.ok(&["new", "app:feat/x"]));
-    let r = e.forest_in(&x, &["rm", "--json"]);
-    assert_eq!(r.code, 0, "{}", r.stderr);
-    assert!(!r.stderr.contains("warning"), "{}", r.stderr);
-    let warnings = r.json()["warnings"].as_array().unwrap().clone();
-    assert_eq!(warnings.len(), 1);
-    assert!(!x.exists());
-
-    // Not inside: no warning.
-    e.ok(&["new", "app:feat/x"]);
-    let r = e.forest(&["rm", "app:feat/x"]);
-    assert!(!r.stderr.contains("warning"), "{}", r.stderr);
-}
-
-#[test]
-fn migrate_normal_clone_keeps_the_working_tree() {
-    let e = Env::new();
-    let up = e.upstream("svc");
-    let dir = e.root.join("svc");
-    e.git(
-        &e.base,
-        &["clone", "-q", up.to_str().unwrap(), dir.to_str().unwrap()],
-    );
-    e.git(&dir, &["checkout", "-q", "-b", "master"]);
+    let src = e.upstream("svc");
     let linked = e.base.join("elsewhere");
     e.git(
-        &dir,
+        &src,
         &[
             "worktree",
             "add",
@@ -885,75 +906,104 @@ fn migrate_normal_clone_keeps_the_working_tree() {
             linked.to_str().unwrap(),
         ],
     );
-    fs::write(dir.join(".gitignore"), "build/\n").unwrap();
-    fs::create_dir(dir.join("build")).unwrap();
-    fs::write(dir.join("build/out"), "x").unwrap();
-    fs::write(dir.join("staged"), "s").unwrap();
-    e.git(&dir, &["add", "staged"]);
-    // A top-level dir named like the branch dir must not get in the way.
-    fs::create_dir(dir.join("master")).unwrap();
-    fs::write(dir.join("master/file"), "m").unwrap();
+    fs::write(src.join("untracked"), "u").unwrap();
+    // A detached HEAD moves along with the repo.
+    e.git(&src, &["checkout", "-q", "--detach"]);
 
-    let r = e.forest(&["migrate", dir.to_str().unwrap(), "--json"]);
+    let r = e.forest(&["migrate", src.to_str().unwrap(), "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
-    assert_eq!(r.json()["path"], dir.to_str().unwrap());
-
-    let wt = dir.join("master");
-    assert!(dir.join(".bare").is_dir());
-    assert!(!dir.join(".git").exists());
-    assert_eq!(fs::read_to_string(wt.join("build/out")).unwrap(), "x");
-    assert_eq!(fs::read_to_string(wt.join("master/file")).unwrap(), "m");
-    assert_eq!(
-        e.git(&wt, &["status", "--porcelain"]),
-        "A  staged\n?? .gitignore\n?? master/"
-    );
-    assert_eq!(e.git(&wt, &["branch", "--show-current"]), "master");
-    // The linked worktree moved into its branch dir.
-    let feat = dir.join("feat-x");
-    assert!(!linked.exists());
-    assert_eq!(e.git(&feat, &["branch", "--show-current"]), "feat/x");
-
-    let ls = e.forest(&["ls", "svc", "--json"]).json();
-    let mut paths: Vec<&str> = ls["worktrees"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|w| w["dir"].as_str().unwrap())
-        .collect();
-    paths.sort();
-    assert_eq!(paths, ["feat-x", "master"]);
-    // origin/HEAD came with the clone, so main stays the default.
-    assert_eq!(
-        e.git(
-            &dir.join(".bare"),
-            &["symbolic-ref", "refs/remotes/origin/HEAD"]
-        ),
-        "refs/remotes/origin/main"
-    );
+    let dest = e.root.join("repos/svc");
+    assert_eq!(r.json()["path"], dest.to_str().unwrap());
+    assert!(!src.exists() && !linked.exists());
+    assert_eq!(fs::read_to_string(dest.join("untracked")).unwrap(), "u");
+    let x = forest_dir(&e, "feat-x").join("svc");
+    assert_eq!(e.git(&x, &["branch", "--show-current"]), "feat/x");
+    assert_eq!(e.ok(&["path", "feat/x", "svc"]), x.to_str().unwrap());
 
     // Running it again changes nothing.
-    let out = e.ok(&["migrate", dir.to_str().unwrap()]);
+    let out = e.ok(&["migrate", dest.to_str().unwrap()]);
     assert!(out.contains("already in the layout"), "{out}");
 }
 
 #[test]
-fn migrate_moves_a_repo_into_the_root() {
+fn migrate_the_older_layout() {
     let e = Env::new();
-    let src = e.upstream("tool");
-    fs::write(src.join("untracked"), "u").unwrap();
-    let out = e.ok(&["migrate", src.to_str().unwrap(), "app"]);
-    assert!(out.ends_with(e.root.join("app").to_str().unwrap()), "{out}");
+    let up = e.upstream("svc");
+    let old = e.root.join("svc");
+    let bare = old.join(".bare");
+    e.git(
+        &e.base,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            up.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    e.git(&bare, &["worktree", "add", "-q", "../main", "main"]);
+    e.git(
+        &bare,
+        &["worktree", "add", "-q", "-b", "feat/x", "../feat-x"],
+    );
+    // A worktree some tool made inside the repo stays there.
+    e.git(
+        &bare,
+        &["worktree", "add", "-q", "-b", "agent", ".tool/agent"],
+    );
+    let main = old.join("main");
+    fs::write(main.join("staged"), "s").unwrap();
+    e.git(&main, &["add", "staged"]);
+    fs::write(main.join("untracked"), "u").unwrap();
+    fs::write(old.join("feat-x/wip"), "w").unwrap();
+
+    let r = e.forest(&["migrate", old.to_str().unwrap()]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(!old.exists());
+    let dest = e.root.join("repos/svc");
+    assert!(dest.join(".git").is_dir());
+    assert_eq!(e.git(&dest, &["branch", "--show-current"]), "main");
+    assert_eq!(
+        e.git(&dest, &["status", "--porcelain"]),
+        "A  staged\n?? untracked"
+    );
+    let x = forest_dir(&e, "feat-x").join("svc");
+    assert_eq!(fs::read_to_string(x.join("wip")).unwrap(), "w");
+    assert_eq!(e.git(&x, &["branch", "--show-current"]), "feat/x");
+    let agent = dest.join(".git/.tool/agent");
+    assert_eq!(e.git(&agent, &["branch", "--show-current"]), "agent");
+    // A bare clone's branches become remote-tracking ones on the next fetch.
+    assert_eq!(
+        e.git(&dest, &["config", "remote.origin.fetch"]),
+        "+refs/heads/*:refs/remotes/origin/*"
+    );
+    e.ok(&["new", "feat/y", "svc"]);
+}
+
+#[test]
+fn migrate_a_bare_repo() {
+    let e = Env::new();
+    let up = e.upstream("lib");
+    // Without worktrees: the default branch is checked out.
+    let src = e.base.join("lib.git");
+    e.git(
+        &e.base,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            up.to_str().unwrap(),
+            src.to_str().unwrap(),
+        ],
+    );
+    e.ok(&["migrate", src.to_str().unwrap()]);
+    let dest = e.root.join("repos/lib");
     assert!(!src.exists());
-    let wt = e.root.join("app/main");
-    assert_eq!(fs::read_to_string(wt.join("untracked")).unwrap(), "u");
-    assert_eq!(e.git(&wt, &["log", "--format=%s"]), "first");
-}
+    assert_eq!(e.git(&dest, &["log", "-1", "--format=%s"]), "first");
+    assert_eq!(e.git(&dest, &["status", "--porcelain"]), "");
 
-#[test]
-fn migrate_bare_repo_with_worktree_inside() {
-    let e = Env::new();
-    let up = e.upstream("lib");
-    let dir = e.root.join("lib.git");
+    // With a worktree inside on the default branch: that becomes the checkout.
+    let src = e.base.join("other.git");
     e.git(
         &e.base,
         &[
@@ -961,26 +1011,24 @@ fn migrate_bare_repo_with_worktree_inside() {
             "-q",
             "--bare",
             up.to_str().unwrap(),
-            dir.to_str().unwrap(),
+            src.to_str().unwrap(),
         ],
     );
-    e.git(&dir, &["worktree", "add", "-q", "wt", "main"]);
-    fs::write(dir.join("wt/dirty"), "d").unwrap();
-
-    e.ok(&["migrate", dir.to_str().unwrap()]);
-    let lib = e.root.join("lib");
-    assert!(!dir.exists());
-    assert!(lib.join(".bare/HEAD").is_file());
-    assert!(!lib.join("HEAD").exists());
-    assert_eq!(fs::read_to_string(lib.join("main/dirty")).unwrap(), "d");
-    assert!(!lib.join("wt").exists());
+    e.git(&src, &["worktree", "add", "-q", "wt", "main"]);
+    fs::write(src.join("wt/dirty"), "d").unwrap();
+    e.ok(&["migrate", src.to_str().unwrap()]);
+    let dest = e.root.join("repos/other");
+    assert_eq!(fs::read_to_string(dest.join("dirty")).unwrap(), "d");
+    assert!(!src.exists());
 }
 
 #[test]
-fn migrate_bare_repo_without_worktrees_adds_the_default() {
+fn migrate_refusals() {
     let e = Env::new();
-    let up = e.upstream("lib");
-    let dir = e.root.join("lib");
+    // An operation in progress in the worktree that would become the checkout.
+    let up = e.upstream("svc");
+    let old = e.base.join("svc");
+    let bare = old.join(".bare");
     e.git(
         &e.base,
         &[
@@ -988,56 +1036,24 @@ fn migrate_bare_repo_without_worktrees_adds_the_default() {
             "-q",
             "--bare",
             up.to_str().unwrap(),
-            dir.to_str().unwrap(),
+            bare.to_str().unwrap(),
         ],
     );
-    e.ok(&["migrate", dir.to_str().unwrap()]);
-    assert_eq!(
-        e.git(&dir.join("main"), &["branch", "--show-current"]),
-        "main"
-    );
-}
-
-#[test]
-fn migrate_nearly_laid_out_project() {
-    let e = Env::new();
-    let wt = e.project("app");
-    let dir = e.root.join("app");
-    e.git(
-        &wt,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "feat/y",
-            dir.join("tmp").to_str().unwrap(),
-        ],
-    );
-    // The hand-made variant: `.git` pointing at `.bare`.
-    fs::write(dir.join(".git"), "gitdir: ./.bare\n").unwrap();
-
-    e.ok(&["migrate", dir.to_str().unwrap()]);
-    assert!(!dir.join(".git").exists());
-    assert!(!dir.join("tmp").exists());
-    assert_eq!(
-        e.git(&dir.join("feat-y"), &["branch", "--show-current"]),
-        "feat/y"
-    );
-}
-
-#[test]
-fn migrate_refuses_detached_head_and_linked_worktrees() {
-    let e = Env::new();
-    let src = e.upstream("x");
-    e.git(&src, &["checkout", "-q", "--detach"]);
-    let r = e.forest(&["migrate", src.to_str().unwrap()]);
+    e.git(&bare, &["worktree", "add", "-q", "../main", "main"]);
+    fs::write(bare.join("worktrees/main/MERGE_HEAD"), "x").unwrap();
+    let r = e.forest(&["migrate", old.to_str().unwrap()]);
     assert_eq!(r.code, 2, "{}", r.stderr);
-    assert!(src.join(".git").is_dir());
-    assert!(!e.root.join("x").exists());
+    assert!(bare.is_dir() && !e.root.join("repos/svc").exists());
 
-    let wt = e.project("app");
-    let r = e.forest(&["migrate", wt.to_str().unwrap()]);
+    // A linked worktree is not a repo of its own.
+    let r = e.forest(&["migrate", old.join("main").to_str().unwrap()]);
     assert_eq!(r.code, 1);
     assert!(r.stderr.contains("linked worktree"), "{}", r.stderr);
+
+    // The name is taken.
+    e.project("x");
+    let src = e.upstream("x");
+    let r = e.forest(&["migrate", src.to_str().unwrap()]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("already exists"), "{}", r.stderr);
 }

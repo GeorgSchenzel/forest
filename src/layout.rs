@@ -1,8 +1,8 @@
-//! The fixed on-disk layout: root, projects, forests, names, targets and cwd context.
+//! The fixed on-disk layout: root, repos, forests, names and cwd context.
 //!
-//! A project is `<root>/<name>/` with a bare repo in `.bare`. A forest is any dir
-//! `<root>/_forests/<name>/`; its members are the worktrees in it, so nothing else is
-//! stored.
+//! A repo is `<root>/repos/<name>/`, a normal clone whose own checkout is its home.
+//! A forest is any dir `<root>/forests/<name>/`; its worktrees are at
+//! `<root>/forests/<name>/<repo>/`, so nothing else is stored.
 
 use std::env;
 use std::fs;
@@ -10,20 +10,16 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::{Result, fail};
 
-pub const FORESTS: &str = "_forests";
-pub const BARE: &str = ".bare";
+pub const REPOS: &str = "repos";
+pub const FORESTS: &str = "forests";
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Name {
-    Project(String),
+/// Where cwd is.
+#[derive(Debug, PartialEq)]
+pub enum Context {
+    /// In a repo's home checkout.
+    Repo(String),
+    /// In a forest dir, or in one of its worktrees.
     Forest(String),
-}
-
-/// Where cwd is: a project or forest, plus the first path component below it
-/// (a worktree dir, or a forest's member), if any.
-pub struct Context {
-    pub name: Name,
-    pub sub: Option<String>,
 }
 
 pub struct Layout {
@@ -52,66 +48,46 @@ impl Layout {
         Ok(Layout { root })
     }
 
-    pub fn project_dir(&self, project: &str) -> PathBuf {
-        self.root.join(project)
+    pub fn repos_dir(&self) -> PathBuf {
+        self.root.join(REPOS)
     }
 
-    pub fn bare(&self, project: &str) -> PathBuf {
-        self.root.join(project).join(BARE)
+    pub fn forests_dir(&self) -> PathBuf {
+        self.root.join(FORESTS)
+    }
+
+    pub fn repo_dir(&self, project: &str) -> PathBuf {
+        self.repos_dir().join(project)
     }
 
     pub fn forest_dir(&self, forest: &str) -> PathBuf {
-        self.root.join(FORESTS).join(forest)
+        self.forests_dir().join(forest)
     }
 
     pub fn is_project(&self, name: &str) -> bool {
-        valid_project_name(name).is_ok() && self.bare(name).is_dir()
+        valid_name(name).is_ok() && self.repo_dir(name).join(".git").is_dir()
     }
 
     pub fn is_forest(&self, name: &str) -> bool {
-        valid_forest_name(name).is_ok() && self.forest_dir(name).is_dir()
+        valid_name(name).is_ok() && self.forest_dir(name).is_dir()
     }
 
     pub fn projects(&self) -> Result<Vec<String>> {
-        self.names_in(&self.root, |n| self.is_project(n))
+        names_in(&self.repos_dir(), |n| self.is_project(n))
     }
 
     pub fn forests(&self) -> Result<Vec<String>> {
-        self.names_in(&self.root.join(FORESTS), |n| self.is_forest(n))
+        names_in(&self.forests_dir(), |n| self.is_forest(n))
     }
 
-    fn names_in(&self, dir: &Path, keep: impl Fn(&str) -> bool) -> Result<Vec<String>> {
-        let mut names = Vec::new();
-        if !dir.is_dir() {
-            return Ok(names);
-        }
-        for entry in fs::read_dir(dir)? {
-            if let Some(name) = entry?.file_name().to_str()
-                && keep(name)
-            {
-                names.push(name.to_string());
-            }
-        }
-        names.sort();
-        Ok(names)
+    /// The forest a worktree at `path` belongs to: `<root>/forests/<forest>/<repo>`.
+    pub fn forest_of(&self, path: &Path) -> Option<String> {
+        let rel = path.strip_prefix(self.forests_dir()).ok()?;
+        let parts: Vec<_> = rel.iter().collect();
+        (parts.len() == 2).then(|| parts[0].to_string_lossy().into_owned())
     }
 
-    /// Resolves a project or forest name; a name that is both is an error.
-    pub fn resolve_name(&self, name: &str) -> Result<Name> {
-        match (self.is_project(name), self.is_forest(name)) {
-            (true, true) => Err(fail!(
-                "'{name}' is both a project and a forest; rename the forest"
-            )),
-            (true, false) => Ok(Name::Project(name.to_string())),
-            (false, true) => Ok(Name::Forest(name.to_string())),
-            (false, false) => Err(fail!(
-                "no project or forest named '{name}' in {}",
-                self.root.display()
-            )),
-        }
-    }
-
-    /// The project or forest cwd is in, if any.
+    /// The repo or forest cwd is in, if any.
     pub fn context(&self) -> Option<Context> {
         let cwd = env::current_dir().ok()?.canonicalize().ok()?;
         let rel = cwd.strip_prefix(&self.root).ok()?;
@@ -122,60 +98,29 @@ impl Layout {
                 _ => None,
             })
             .collect();
-        let first = parts.first()?;
-        if first == FORESTS {
-            let forest = parts.get(1)?;
-            return self.is_forest(forest).then(|| Context {
-                name: Name::Forest(forest.clone()),
-                sub: parts.get(2).cloned(),
-            });
+        let name = parts.get(1)?;
+        match parts.first()?.as_str() {
+            REPOS => self.is_project(name).then(|| Context::Repo(name.clone())),
+            FORESTS => self.is_forest(name).then(|| Context::Forest(name.clone())),
+            _ => None,
         }
-        self.is_project(first).then(|| Context {
-            name: Name::Project(first.clone()),
-            sub: parts.get(1).cloned(),
-        })
     }
+}
 
-    /// Splits `<project>:<branch>`, or `:<branch>` in the project cwd is in; `None`
-    /// for a word without `:`, which names a forest.
-    pub fn split_target(&self, s: &str) -> Result<Option<(String, String)>> {
-        let Some((project, branch)) = s.split_once(':') else {
-            return Ok(None);
-        };
-        if branch.is_empty() {
-            return Err(fail!("invalid target '{s}': expected <project>:<branch>"));
-        }
-        if project.is_empty() {
-            return match self.context_project() {
-                Some(p) => Ok(Some((p, branch.to_string()))),
-                None => Err(fail!(
-                    "'{s}' needs a project: run it inside one, or write <project>{s}"
-                )),
-            };
-        }
-        if !self.is_project(project) {
-            return Err(fail!(
-                "no project named '{project}' in {}",
-                self.root.display()
-            ));
-        }
-        Ok(Some((project.to_string(), branch.to_string())))
+fn names_in(dir: &Path, keep: impl Fn(&str) -> bool) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    if !dir.is_dir() {
+        return Ok(names);
     }
-
-    /// The forest a worktree at `path` belongs to: `<root>/_forests/<forest>/<project>`.
-    pub fn forest_of(&self, path: &Path) -> Option<String> {
-        let rel = path.strip_prefix(self.root.join(FORESTS)).ok()?;
-        let parts: Vec<_> = rel.iter().collect();
-        (parts.len() == 2).then(|| parts[0].to_string_lossy().into_owned())
-    }
-
-    /// The project cwd is in, if any.
-    pub fn context_project(&self) -> Option<String> {
-        match self.context()?.name {
-            Name::Project(p) => Some(p),
-            Name::Forest(_) => None,
+    for entry in fs::read_dir(dir)? {
+        if let Some(name) = entry?.file_name().to_str()
+            && keep(name)
+        {
+            names.push(name.to_string());
         }
     }
+    names.sort();
+    Ok(names)
 }
 
 /// `p` with symlinks resolved, or as given when it doesn't exist (paths compare equal
@@ -203,23 +148,11 @@ pub fn slug(branch: &str) -> String {
     s
 }
 
-pub fn valid_project_name(name: &str) -> Result<()> {
-    if name.is_empty()
-        || name.starts_with('_')
-        || name.starts_with('.')
-        || name.contains(['/', '\\', ':'])
-    {
-        return Err(fail!(
-            "invalid project name '{name}': must not be empty, start with '_' or '.', or contain '/' or ':'"
-        ));
-    }
-    Ok(())
-}
-
-pub fn valid_forest_name(name: &str) -> Result<()> {
+/// A repo or forest name: one plain path component.
+pub fn valid_name(name: &str) -> Result<()> {
     if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\', ':']) {
         return Err(fail!(
-            "invalid forest name '{name}': must not be empty, start with '.', or contain '/' or ':'"
+            "invalid name '{name}': must not be empty, start with '.', or contain '/' or ':'"
         ));
     }
     Ok(())
@@ -240,11 +173,12 @@ mod tests {
     }
 
     #[test]
-    fn project_names() {
-        assert!(valid_project_name("backend").is_ok());
-        assert!(valid_project_name("_forests").is_err());
-        assert!(valid_project_name(".x").is_err());
-        assert!(valid_project_name("a:b").is_err());
-        assert!(valid_project_name("").is_err());
+    fn names() {
+        assert!(valid_name("backend").is_ok());
+        assert!(valid_name("_x").is_ok());
+        assert!(valid_name(".x").is_err());
+        assert!(valid_name("a:b").is_err());
+        assert!(valid_name("a/b").is_err());
+        assert!(valid_name("").is_err());
     }
 }
