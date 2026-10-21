@@ -267,7 +267,7 @@ fn fill_status(row: &mut Row) {
 }
 
 /// Left-aligned columns, two spaces apart, trailing blanks trimmed.
-fn align(rows: Vec<Vec<String>>, indent: usize) -> String {
+pub fn align(rows: Vec<Vec<String>>, indent: usize) -> String {
     let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
     let widths: Vec<usize> = (0..cols)
         .map(|c| {

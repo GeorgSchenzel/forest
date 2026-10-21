@@ -8,10 +8,10 @@ use std::path::PathBuf;
 use std::process::exit;
 
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{Map, Value, json};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::layout::Layout;
 
 const TARGETS: &str = "\
@@ -79,11 +79,16 @@ Examples:
         target: Option<String>,
     },
     /// Print the absolute path of a forest or worktree
+    ///
+    /// A forest with only one worktree prints that worktree.
     #[command(after_help = TARGETS)]
     Path {
         target: Option<String>,
         #[arg(value_name = "REPO", requires = "target")]
         repo: Option<String>,
+        /// Choose in a fuzzy picker
+        #[arg(long, conflicts_with = "target")]
+        pick: bool,
     },
     /// Remove a forest, or one of its worktrees
     #[command(after_help = TARGETS)]
@@ -119,6 +124,27 @@ in it are removed too.")]
     },
     /// Prune stale worktree metadata and report orphaned dirs
     Prune,
+    /// Print the shell code for `fcd` and completion
+    #[command(after_help = "\
+Add to ~/.zshrc:
+  eval \"$(forest shell-init zsh)\"
+
+fcd <target> [repo] goes where `forest path` points; fcd alone opens a picker.")]
+    ShellInit {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+    /// Completion candidates for the shell
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        words: Vec<String>,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Shell {
+    Zsh,
 }
 
 /// What a command prints: `text` normally, `json` with `--json`.
@@ -154,8 +180,8 @@ fn run(cli: Cli) -> Result<Output> {
             from,
         } => cmd::new::new(&layout, &branch, &repos, alias.as_deref(), from.as_deref()),
         Command::Ls { target } => cmd::ls::ls(&layout, target.as_deref()),
-        Command::Path { target, repo } => {
-            cmd::path::path(&layout, target.as_deref(), repo.as_deref())
+        Command::Path { target, repo, pick } => {
+            cmd::path::path(&layout, target.as_deref(), repo.as_deref(), pick)
         }
         Command::Rm {
             target,
@@ -175,6 +201,8 @@ fn run(cli: Cli) -> Result<Output> {
             delete_branch,
         } => cmd::clean::clean(&layout, dry_run, delete_branch),
         Command::Prune => cmd::prune::prune(&layout),
+        Command::ShellInit { shell: Shell::Zsh } => Ok(cmd::shell::shell_init()),
+        Command::Complete { words } => Ok(cmd::complete::complete(&layout, &words)),
     }
 }
 
@@ -223,7 +251,7 @@ fn main() {
             if as_json {
                 let err = json!({"error": {"code": e.kind(), "message": e.to_string()}});
                 println!("{}", versioned(err));
-            } else {
+            } else if !matches!(e, Error::Cancelled) {
                 eprintln!("forest: {e}");
             }
             exit(e.exit_code());

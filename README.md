@@ -56,7 +56,7 @@ forest clone git@github.com:me/backend.git   # or: forest init <name> for a new 
 forest clone git@github.com:me/frontend.git
 
 forest new feat/x backend                    # one repo
-cd "$(forest path feat/x)"
+fcd feat/x                                   # into forests/feat-x/backend
 
 forest new feat/auth backend frontend        # the same branch in several repos
 
@@ -64,6 +64,8 @@ forest ls                                    # everything, with dirty / ahead / 
 forest rm feat/auth --delete-branch          # clean up worktrees and branches
 forest clean                                 # remove every forest that is done
 ```
+
+`path` of a forest with only one repo is that repo's worktree, so you land where git is.
 
 A target is a forest, by its name or its branch, or a repo, which means its own checkout. A repo after it picks one worktree: `forest path feat/auth backend`, or `forest path main backend` for the repo's checkout. Names match exactly, and a word that names two things is an error, never a guess. `path` and `rm` with no argument act on the forest or repo you are in.
 
@@ -74,11 +76,12 @@ A target is a forest, by its name or its branch, or a repo, which means its own 
 | `migrate <path> [name]` | Move an existing clone, bare repo or older layout into the layout |
 | `new <branch> <repo>… [--as <name>] [--from <ref>]` | Check out a branch in repos, in its forest |
 | `ls [target]` | List repos and forests with their status |
-| `path [target [repo]]` | Print the absolute path |
+| `path [target [repo]] [--pick]` | Print the absolute path, or choose it in a fuzzy picker |
 | `rm [target [repo]] [--force] [--delete-branch]` | Remove a forest or one of its worktrees, and optionally their branches |
 | `mv <forest> <name>` | Rename a forest |
 | `clean [--dry-run] [--delete-branch]` | Remove every forest whose work is done |
 | `prune` | Clean up stale worktree metadata |
+| `shell-init zsh` | Print the shell code for `fcd` and completion |
 
 Global flags: `--json` (versioned output for scripts) and `--root <path>`.
 
@@ -89,6 +92,16 @@ With `--json`, `path`, `new`, `rm` and `mv` describe their target the same way h
 ```
 
 `kind` is `forest` or `worktree`. A worktree has its `project`, and its `forest` unless it is the repo's own checkout. `branch` is `null` for a detached worktree, or a forest with no worktree on a branch.
+
+## Shell
+
+A program can't change your shell's directory, so `cd` needs a shell function. Add to `~/.zshrc`, anywhere:
+
+```sh
+command -v forest >/dev/null && eval "$(forest shell-init zsh)"
+```
+
+That gives `fcd <target> [repo]`, which goes where `forest path` points, and `fcd` alone, which opens a fuzzy picker over every forest (🌲) and repo (📦), starting on the one you are in. `forest` and `fcd` complete forests, branches and repos. The shell code only calls `forest`, so a new build takes effect in open shells.
 
 ## Good to know
 

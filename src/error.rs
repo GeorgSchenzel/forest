@@ -1,10 +1,12 @@
 use std::fmt;
 
-/// `Fail` exits 1, `Refused` (a safety check said no) exits 2.
+/// `Fail` exits 1, `Refused` (a safety check said no) exits 2, `Cancelled` (the
+/// user backed out) exits 1 without a message.
 #[derive(Debug)]
 pub enum Error {
     Fail(String),
     Refused(String),
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -12,7 +14,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl Error {
     pub fn exit_code(&self) -> i32 {
         match self {
-            Error::Fail(_) => 1,
+            Error::Fail(_) | Error::Cancelled => 1,
             Error::Refused(_) => 2,
         }
     }
@@ -21,6 +23,7 @@ impl Error {
         match self {
             Error::Fail(_) => "error",
             Error::Refused(_) => "refused",
+            Error::Cancelled => "cancelled",
         }
     }
 }
@@ -29,6 +32,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Fail(m) | Error::Refused(m) => f.write_str(m),
+            Error::Cancelled => f.write_str("cancelled"),
         }
     }
 }

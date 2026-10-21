@@ -1,9 +1,12 @@
 pub mod clean;
+pub mod complete;
 pub mod ls;
 pub mod migrate;
 pub mod mv;
 pub mod new;
 pub mod path;
+pub mod pick;
 pub mod prune;
 pub mod rm;
 pub mod setup;
+pub mod shell;
