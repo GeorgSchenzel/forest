@@ -250,7 +250,7 @@ fn check_main(gitdir: &Path, dir: &Path, branch: &Option<String>) -> Result<Stri
     Ok(branch.clone())
 }
 
-/// Whether a worktree is where the layout wants it: in a workforest, or at its
+/// Whether a worktree is where the layout wants it: in a forest, or at its
 /// branch dir in the project.
 fn placed(layout: &Layout, dir: &Path, path: &Path, branch: Option<&str>) -> bool {
     path.starts_with(layout.root.join(FORESTS)) || branch.is_some_and(|b| path == dir.join(slug(b)))

@@ -1,4 +1,4 @@
-//! `rm`: remove a worktree or a whole workforest, refusing anything that could lose work.
+//! `rm`: remove a worktree or a whole forest, refusing anything that could lose work.
 
 use std::env;
 use std::fs;
@@ -30,7 +30,7 @@ pub fn rm(
     let identity = located.identity(layout)?;
     // Before removing: a deleted cwd can't be resolved.
     let cwd_in_target = env::current_dir().is_ok_and(|c| canonical(&c).starts_with(&identity.path));
-    let (items, orphans, workforest) = match located {
+    let (items, orphans, forest) = match located {
         Located::Worktree { project, worktree } => {
             let item = Item {
                 missing: !worktree.path.exists(),
@@ -40,8 +40,8 @@ pub fn rm(
             };
             (vec![item], vec![], None)
         }
-        Located::Workforest { dir, .. } => {
-            let (items, orphans) = workforest_items(layout, &dir)?;
+        Located::Forest { dir, .. } => {
+            let (items, orphans) = forest_items(layout, &dir)?;
             (items, orphans, Some(dir))
         }
     };
@@ -82,8 +82,8 @@ pub fn rm(
         }
     }
     // Even with --force, entries that aren't worktrees are never deleted; they keep
-    // the workforest dir.
-    if let Some(dir) = &workforest
+    // the forest dir.
+    if let Some(dir) = &forest
         && errors.is_empty()
     {
         if !orphans.is_empty() {
@@ -121,13 +121,11 @@ pub fn rm(
     Ok(out)
 }
 
-/// The worktrees in a workforest dir, including registered ones whose dir is
+/// The worktrees in a forest dir, including registered ones whose dir is
 /// gone, and entries that aren't worktrees.
-fn workforest_items(layout: &Layout, dir: &Path) -> Result<(Vec<Item>, Vec<PathBuf>)> {
+fn forest_items(layout: &Layout, dir: &Path) -> Result<(Vec<Item>, Vec<PathBuf>)> {
     let dir = canonical(dir);
     let mut items = Vec::new();
-    // Every project, not just the forest's: a project may have left the forest
-    // after its worktree was made.
     for project in layout.projects()? {
         for w in worktrees(&layout.bare(&project))? {
             if w.path.parent() == Some(dir.as_path()) {

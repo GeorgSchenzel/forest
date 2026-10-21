@@ -1,4 +1,3 @@
-pub mod define;
 pub mod ls;
 pub mod migrate;
 pub mod new;
