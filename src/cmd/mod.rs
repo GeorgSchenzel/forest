@@ -5,6 +5,7 @@ pub mod migrate;
 pub mod mv;
 pub mod new;
 pub mod path;
+pub mod pick;
 pub mod prune;
 pub mod rm;
 pub mod setup;

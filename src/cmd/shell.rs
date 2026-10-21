@@ -9,7 +9,11 @@ const ZSH: &str = r#"# forest: eval "$(forest shell-init zsh)" in .zshrc
 
 fcd() {
   local dir
-  dir=$(command forest path "$@") || return
+  if (( $# )); then
+    dir=$(command forest path "$@") || return
+  else
+    dir=$(command forest path --pick) || return
+  fi
   builtin cd -- "$dir"
 }
 

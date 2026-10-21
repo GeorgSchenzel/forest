@@ -88,8 +88,18 @@ impl Located {
 }
 
 /// A forest with only one worktree means that worktree, so `cd` lands in the repo.
-pub fn path(layout: &Layout, target: Option<&str>, project: Option<&str>) -> Result<Output> {
-    let located = step_in(layout, locate(layout, target, project)?)?;
+pub fn path(
+    layout: &Layout,
+    target: Option<&str>,
+    project: Option<&str>,
+    pick: bool,
+) -> Result<Output> {
+    let located = if pick {
+        crate::cmd::pick::pick(layout)?
+    } else {
+        locate(layout, target, project)?
+    };
+    let located = step_in(layout, located)?;
     Ok(Output::new(
         format!("{}\n", located.path().display()),
         located.identity(layout)?.with(json!({})),

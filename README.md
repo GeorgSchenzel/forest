@@ -76,7 +76,7 @@ A target is a forest, by its name or its branch, or a repo, which means its own 
 | `migrate <path> [name]` | Move an existing clone, bare repo or older layout into the layout |
 | `new <branch> <repo>… [--as <name>] [--from <ref>]` | Check out a branch in repos, in its forest |
 | `ls [target]` | List repos and forests with their status |
-| `path [target [repo]]` | Print the absolute path |
+| `path [target [repo]] [--pick]` | Print the absolute path, or choose it in a fuzzy picker |
 | `rm [target [repo]] [--force] [--delete-branch]` | Remove a forest or one of its worktrees, and optionally their branches |
 | `mv <forest> <name>` | Rename a forest |
 | `clean [--dry-run] [--delete-branch]` | Remove every forest whose work is done |
@@ -101,7 +101,7 @@ A program can't change your shell's directory, so `cd` needs a shell function. A
 command -v forest >/dev/null && eval "$(forest shell-init zsh)"
 ```
 
-That gives `fcd [target [repo]]`, which goes where `forest path` points. `forest` and `fcd` complete forests, branches and repos. The shell code only calls `forest`, so a new build takes effect in open shells.
+That gives `fcd <target> [repo]`, which goes where `forest path` points, and `fcd` alone, which opens a fuzzy picker over every forest (🌲) and repo (📦), starting on the one you are in. `forest` and `fcd` complete forests, branches and repos. The shell code only calls `forest`, so a new build takes effect in open shells.
 
 ## Good to know
 

@@ -11,7 +11,7 @@ use clap::error::ErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{Map, Value, json};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::layout::Layout;
 
 const TARGETS: &str = "\
@@ -86,6 +86,9 @@ Examples:
         target: Option<String>,
         #[arg(value_name = "REPO", requires = "target")]
         repo: Option<String>,
+        /// Choose in a fuzzy picker
+        #[arg(long, conflicts_with = "target")]
+        pick: bool,
     },
     /// Remove a forest, or one of its worktrees
     #[command(after_help = TARGETS)]
@@ -126,7 +129,7 @@ in it are removed too.")]
 Add to ~/.zshrc:
   eval \"$(forest shell-init zsh)\"
 
-fcd [target [repo]] goes where `forest path` points.")]
+fcd <target> [repo] goes where `forest path` points; fcd alone opens a picker.")]
     ShellInit {
         #[arg(value_enum)]
         shell: Shell,
@@ -177,8 +180,8 @@ fn run(cli: Cli) -> Result<Output> {
             from,
         } => cmd::new::new(&layout, &branch, &repos, alias.as_deref(), from.as_deref()),
         Command::Ls { target } => cmd::ls::ls(&layout, target.as_deref()),
-        Command::Path { target, repo } => {
-            cmd::path::path(&layout, target.as_deref(), repo.as_deref())
+        Command::Path { target, repo, pick } => {
+            cmd::path::path(&layout, target.as_deref(), repo.as_deref(), pick)
         }
         Command::Rm {
             target,
@@ -248,7 +251,7 @@ fn main() {
             if as_json {
                 let err = json!({"error": {"code": e.kind(), "message": e.to_string()}});
                 println!("{}", versioned(err));
-            } else {
+            } else if !matches!(e, Error::Cancelled) {
                 eprintln!("forest: {e}");
             }
             exit(e.exit_code());

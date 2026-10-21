@@ -450,6 +450,17 @@ fn path_steps_into_the_only_worktree() {
     assert!(!forest_dir(&e, "feat-x").exists());
 }
 
+#[test]
+fn pick_needs_a_terminal() {
+    let e = Env::new();
+    e.project("api");
+    let r = e.forest(&["path", "--pick"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("needs a terminal"), "{}", r.stderr);
+    let r = e.forest(&["path", "--pick", "api"]);
+    assert_eq!(r.code, 1);
+}
+
 fn complete(e: &Env, words: &[&str]) -> Vec<String> {
     let mut args = vec!["__complete", "--"];
     args.extend(words);
