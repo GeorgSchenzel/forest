@@ -1,4 +1,5 @@
-//! `rm`: remove a forest or one of its worktrees, refusing anything that could lose work.
+//! `rm`: remove one of a forest's worktrees, or the forest you are in, refusing
+//! anything that could lose work.
 
 use std::env;
 use std::fs;
@@ -28,6 +29,7 @@ pub fn rm(
     delete_branch: bool,
 ) -> Result<Output> {
     let located = locate(layout, target, project)?;
+    require_worktree_target(target, &located)?;
     let identity = located.identity(layout)?;
     // Before removing: a deleted cwd can't be resolved.
     let cwd_in_target = env::current_dir().is_ok_and(|c| canonical(&c).starts_with(&identity.path));
@@ -136,6 +138,19 @@ pub fn rm(
         ));
     }
     Ok(out)
+}
+
+/// `rm` and `done` act on one worktree (`<target> <repo>`) or on the forest cwd
+/// is in; a forest named from elsewhere would take all of it out at once. Runs
+/// after `locate`, so an unknown name is reported as unknown, and a repo name
+/// still reaches the home refusal.
+pub fn require_worktree_target(target: Option<&str>, located: &Located) -> Result<()> {
+    if target.is_some() && matches!(located, Located::Forest { .. }) {
+        return Err(fail!(
+            "name a worktree ('<forest> <repo>'); for a whole forest, cd into it"
+        ));
+    }
+    Ok(())
 }
 
 /// The worktrees in a forest dir, including registered ones whose dir is gone, and

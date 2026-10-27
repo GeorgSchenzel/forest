@@ -7,7 +7,7 @@ Work on many branches at once, in one repo or across several, without thinking a
 ## What you get
 
 - **Parallel work without switching.** Every branch gets its own folder. You can review a PR, fix a bug and keep building a feature at the same time, with no stashing and no rebuilds after a checkout.
-- **One command to start, one to finish.** `forest new` gives you a ready folder for a branch. `forest rm` cleans it up again, and refuses if you would lose work. `forest clean` clears away everything that is merged.
+- **One command to start, one to finish.** `forest new` gives you a ready folder for a branch. `forest done` merges it in and cleans up in one go; `forest rm` cleans up on its own, and refuses if you would lose work. `forest clean` clears away everything that is merged.
 - **Everything has a known place.** Branches live at predictable paths, so you never search for "that checkout from last week". `forest ls` shows all of them with their status.
 - **Branches across repos.** When a change spans several repos, the same branch of each sits side by side in one folder.
 
@@ -59,15 +59,18 @@ forest new feat/x backend                    # one repo
 fcd feat/x                                   # into forests/feat-x/backend
 
 forest new feat/auth backend frontend        # the same branch in several repos
+forest push feat/auth                        # every branch to origin
+fcd feat/auth
+forest done                                  # merge and close, from inside
 
 forest ls                                    # everything, with dirty / ahead / behind
-forest rm feat/auth --delete-branch          # clean up worktrees and branches
+forest rm feat/auth backend                  # remove one worktree
 forest clean                                 # remove every forest that is done
 ```
 
 `path` of a forest with only one repo is that repo's worktree, so you land where git is.
 
-A target is a forest, by its name or its branch, or a repo, which means its own checkout. A repo after it picks one worktree: `forest path feat/auth backend`, or `forest path main backend` for the repo's checkout. Names match exactly, and a word that names two things is an error, never a guess. `path` and `rm` with no argument act on the forest or repo you are in.
+A target is a forest, by its name or its branch, or a repo, which means its own checkout. A repo after it picks one worktree: `forest path feat/auth backend`, or `forest path main backend` for the repo's checkout. Names match exactly, and a word that names two things is an error, never a guess. With no argument, a command acts on the forest or repo you are in. `rm` and `done` name one worktree (`<target> <repo>`) or take the forest they are run in: a forest named from elsewhere would remove all of it at once, so they refuse it.
 
 | Command | Purpose |
 |---|---|
@@ -77,7 +80,9 @@ A target is a forest, by its name or its branch, or a repo, which means its own 
 | `new <branch> <repo>… [--as <name>] [--from <ref>]` | Check out a branch in repos, in its forest |
 | `ls [target]` | List repos and forests with their status |
 | `path [target [repo]] [--pick]` | Print the absolute path, or choose it in a fuzzy picker |
-| `rm [target [repo]] [--force] [--delete-branch]` | Remove a forest or one of its worktrees, and optionally their branches |
+| `rm [target [repo]] [--force] [--delete-branch]` | Remove one worktree, or the forest you are in, and optionally their branches |
+| `done [target [repo]] [--delete-branch]` | Merge each branch into its default branch (fast-forward), then close the forest |
+| `push [target [repo]]` | Push the branches of a forest's worktrees to origin |
 | `mv <forest> <name>` | Rename a forest |
 | `clean [--dry-run] [--delete-branch]` | Remove every forest whose work is done |
 | `prune` | Clean up stale worktree metadata |
@@ -109,7 +114,9 @@ That gives `fcd <target> [repo]`, which goes where `forest path` points, and `fc
 - `new` adds to the forest that has the branch already, else makes one. It fails if a worktree is there already, and is all or nothing: if one repo fails, the worktrees and branches it made are removed again.
 - `new` uses an existing local branch, else the remote branch (with tracking), else creates a new branch from `--from` or the default branch. It says which on stderr, and as `branch_created` and `from` with `--json`. `--from` is only for a new branch, and must exist in every repo.
 - Git allows a branch to be checked out in only one worktree. A repo's own checkout holds its default branch, so no forest can have it.
-- `rm` never removes a repo's own checkout. It refuses if there are uncommitted changes. `--delete-branch` only deletes a branch if every commit is on a remote-tracking branch or on the default branch, and never the default branch itself.
+- `rm` removes one worktree, or the forest it is run in. It never removes a repo's own checkout. It refuses if there are uncommitted changes. `--delete-branch` only deletes a branch if every commit is on a remote-tracking branch or on the default branch, and never the default branch itself.
+- `done` merges fast-forward only, in each repo's home, and checks everything before touching anything: worktrees clean and on branches, homes on the default branch and clean, and every merge a fast-forward or already in. Any refusal refuses the whole forest, so nothing is left half-merged. With `--delete-branch` the branch goes too — the merge just put its commits on the default branch, so nothing is lost; the default branch itself is never deleted.
+- `push` pushes each branch to `origin` under its own name and tracks it (`git push -u origin <branch>`), also recreating a remote branch that was deleted. One repo failing doesn't stop the others.
 - `clean` removes a forest when none of its worktrees has uncommitted changes, and each branch is merged into the default branch or its upstream is gone. A branch nobody committed on yet doesn't count as merged. Ignored files go with the forest, as with `rm`. Branches stay, unless `--delete-branch`, which follows the same rule as `rm`: a squash-merged branch with commits that were never pushed is kept.
 - `mv` renames only the folder, and tells git where the worktrees are now. Renaming a folder by hand breaks that link; `git worktree repair` in the repo fixes it.
 - `migrate` moves working trees instead of checking them out again, so staged, untracked and ignored files survive. For a bare repo, the worktree on the default branch becomes the repo's checkout, and the others move to their forests. Worktrees inside the repo stay where they are. It refuses an operation in progress in the worktree that becomes the checkout, and a repo outside the root must be on the same filesystem.

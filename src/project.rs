@@ -127,6 +127,12 @@ pub fn commit_exists(repo: &Path, rev: &str) -> bool {
     )
 }
 
+/// Whether `ancestor` is an ancestor of `descendant` (a branch is its own
+/// ancestor). Also false when either ref doesn't exist.
+pub fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
+    git_ok(repo, ["merge-base", "--is-ancestor", ancestor, descendant])
+}
+
 /// Fetches `origin`, and sets `origin/HEAD` if it is missing (remote added later).
 pub fn fetch(repo: &Path) -> Result<()> {
     git_loud(repo, ["fetch", "--prune", "origin"])?;

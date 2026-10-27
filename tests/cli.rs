@@ -446,7 +446,7 @@ fn path_steps_into_the_only_worktree() {
     assert_eq!(e.ok(&["path", "feat/x"]), s(&forest_dir(&e, "feat-x")));
     // And `rm` still means the whole forest.
     e.ok(&["rm", "feat/x", "web"]);
-    e.ok(&["rm", "feat/x"]);
+    e.ok(&["rm", "feat/x", "api"]);
     assert!(!forest_dir(&e, "feat-x").exists());
 }
 
@@ -482,11 +482,18 @@ fn completion() {
     let targets = ["api", "feat-x", "feat/x", "feat/y", "shop", "web"];
     assert_eq!(complete(&e, &["forest", "path", ""]), targets);
     assert_eq!(complete(&e, &["forest", "--json", "rm", "f"]), targets);
+    assert_eq!(complete(&e, &["forest", "done", ""]), targets);
+    assert_eq!(complete(&e, &["forest", "push", "f"]), targets);
     assert_eq!(complete(&e, &["fcd", ""]), targets);
     // The second word is a repo of that forest, or any repo.
     assert_eq!(complete(&e, &["fcd", "feat/x", ""]), ["api"]);
     assert_eq!(
         complete(&e, &["forest", "path", "shop", ""]),
+        ["api", "web"]
+    );
+    assert_eq!(complete(&e, &["forest", "done", "feat/x", ""]), ["api"]);
+    assert_eq!(
+        complete(&e, &["forest", "push", "shop", ""]),
         ["api", "web"]
     );
     assert_eq!(
@@ -543,7 +550,7 @@ fn rm_refuses_dirty_worktrees() {
     let x = f.join("app");
     fs::write(x.join("new.txt"), "x").unwrap();
 
-    let r = e.forest(&["rm", "feat/x", "--json"]);
+    let r = e.forest(&["rm", "feat/x", "app", "--json"]);
     assert_eq!(r.code, 2);
     assert_eq!(r.json()["error"]["code"], "refused");
     assert!(x.exists());
@@ -554,7 +561,7 @@ fn rm_refuses_dirty_worktrees() {
     e.git(&x, &["add", ".gitignore"]);
     e.commit(&x, "ignore");
     fs::write(x.join("a.log"), "x").unwrap();
-    e.ok(&["rm", "feat/x"]);
+    e.ok(&["rm", "feat/x", "app"]);
     assert!(!f.exists());
     // The branch is kept.
     assert!(has_branch(&e, &e.root.join("repos/app"), "feat/x"));
@@ -603,12 +610,15 @@ fn rm_delete_branch_never_loses_commits() {
     // Unpushed commits: refused.
     let a = PathBuf::from(e.ok(&["new", "feat/a", "svc"])).join("svc");
     e.commit(&a, "unpushed");
-    assert_eq!(e.forest(&["rm", "feat/a", "--delete-branch"]).code, 2);
+    assert_eq!(
+        e.forest(&["rm", "feat/a", "svc", "--delete-branch"]).code,
+        2
+    );
     assert!(a.exists());
 
     // Nothing beyond main: deleted.
     e.ok(&["new", "feat/b", "svc"]);
-    e.ok(&["rm", "feat/b", "--delete-branch"]);
+    e.ok(&["rm", "feat/b", "svc", "--delete-branch"]);
     assert!(!has_branch(&e, &repo, "feat/b"));
 
     // Upstream gone, but with a commit that was never pushed: refused.
@@ -617,17 +627,20 @@ fn rm_delete_branch_never_loses_commits() {
     e.commit(&c, "never pushed");
     e.git(&up, &["branch", "-D", "feat/c"]);
     e.git(&repo, &["fetch", "-q", "--prune"]);
-    assert_eq!(e.forest(&["rm", "feat/c", "--delete-branch"]).code, 2);
+    assert_eq!(
+        e.forest(&["rm", "feat/c", "svc", "--delete-branch"]).code,
+        2
+    );
     // Upstream gone after a real merge: everything is on main, so deleted.
     e.git(&up, &["branch", "feat/d"]);
     e.ok(&["new", "feat/d", "svc"]);
     e.git(&up, &["branch", "-D", "feat/d"]);
     e.git(&repo, &["fetch", "-q", "--prune"]);
-    e.ok(&["rm", "feat/d", "--delete-branch"]);
+    e.ok(&["rm", "feat/d", "svc", "--delete-branch"]);
     assert!(!has_branch(&e, &repo, "feat/d"));
 
     // --force overrides, except for the default branch.
-    e.ok(&["rm", "feat/a", "--delete-branch", "--force"]);
+    e.ok(&["rm", "feat/a", "svc", "--delete-branch", "--force"]);
     assert!(!has_branch(&e, &repo, "feat/a"));
     e.git(&repo, &["checkout", "-q", "-b", "elsewhere"]);
     e.ok(&["new", "main", "svc"]);
@@ -647,10 +660,10 @@ fn rm_finds_missing_worktrees_and_keeps_strays() {
     fs::write(f.join("notes/todo"), "x").unwrap();
 
     // The stray dir refuses without --force.
-    assert_eq!(e.forest(&["rm", "shop"]).code, 2);
+    assert_eq!(e.forest_in(&f, &["rm"]).code, 2);
 
     // With --force, both worktrees go, but the stray dir is kept.
-    let r = e.forest(&["rm", "shop", "--force", "--delete-branch", "--json"]);
+    let r = e.forest_in(&f, &["rm", "--force", "--delete-branch", "--json"]);
     assert_eq!(r.code, 1, "{}", r.stderr);
     let j = r.json();
     assert_eq!(j["removed"].as_array().unwrap().len(), 2);
@@ -684,8 +697,239 @@ fn rm_warns_when_cwd_is_inside_the_target() {
 
     // Not inside: no warning.
     e.ok(&["new", "feat/x", "app"]);
-    let r = e.forest(&["rm", "feat/x"]);
+    let r = e.forest(&["rm", "feat/x", "app"]);
     assert!(!r.stderr.contains("warning"), "{}", r.stderr);
+}
+
+#[test]
+fn rm_and_done_need_a_worktree_or_cwd() {
+    let e = Env::new();
+    e.project("app");
+    e.ok(&["new", "feat/x", "app"]);
+    for args in [
+        &["rm", "feat/x"][..],
+        &["rm", "feat-x"],
+        &["done", "feat/x"],
+        &["done", "feat-x"],
+    ] {
+        let r = e.forest(args);
+        assert_eq!(r.code, 1, "{args:?}");
+        assert!(
+            r.stderr.contains("name a worktree"),
+            "{args:?}: {}",
+            r.stderr
+        );
+        assert!(forest_dir(&e, "feat-x").exists());
+    }
+
+    // An unknown name is unknown, not a missing repo.
+    for args in [&["rm", "nope"][..], &["done", "nope"]] {
+        let r = e.forest(args);
+        assert_eq!(r.code, 1, "{args:?}");
+        assert!(r.stderr.contains("named 'nope'"), "{args:?}: {}", r.stderr);
+    }
+
+    // One worktree by name, and the whole forest from inside, still work.
+    e.ok(&["rm", "feat/x", "app"]);
+    let f = PathBuf::from(e.ok(&["new", "feat/y", "app"]));
+    let r = e.forest_in(&f, &["rm"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(!f.exists());
+}
+
+#[test]
+fn done_merges_and_closes() {
+    let e = Env::new();
+    let up = e.upstream("svc");
+    let repo = PathBuf::from(e.ok(&["clone", up.to_str().unwrap()]));
+    e.ok(&["new", "feat/x", "svc"]);
+    let x = forest_dir(&e, "feat-x").join("svc");
+    e.commit(&x, "work");
+
+    let r = e.forest_in(&x, &["done", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let j = r.json();
+    assert_eq!(j["forest"], "feat-x");
+    let m = &j["merged"][0];
+    assert_eq!(m["branch"], "feat/x");
+    assert_eq!(m["into"], "main");
+    assert_eq!(m["already_merged"], false);
+    assert_eq!(m["branch_deleted"], false);
+    assert_eq!(j["warnings"].as_array().unwrap().len(), 1);
+    assert_eq!(e.git(&repo, &["log", "-1", "--format=%s"]), "work");
+    assert!(!forest_dir(&e, "feat-x").exists());
+    // The branch stays; all its commits are on main now.
+    assert!(has_branch(&e, &repo, "feat/x"));
+}
+
+#[test]
+fn done_checks_everything_first() {
+    let e = Env::new();
+    e.project("api");
+    e.project("web");
+    e.ok(&["new", "feat/x", "api", "web"]);
+    let f = forest_dir(&e, "feat-x");
+    e.commit(&f.join("api"), "api work");
+    e.commit(&f.join("web"), "web work");
+    // main of web moves ahead: the branches diverge.
+    e.commit(&e.root.join("repos/web"), "home moves");
+
+    let r = e.forest_in(&f, &["done"]);
+    assert_eq!(r.code, 2);
+    assert!(r.stderr.contains("diverged"), "{}", r.stderr);
+    // api was mergeable, but nothing went through.
+    assert_eq!(
+        e.git(&e.root.join("repos/api"), &["log", "-1", "--format=%s"]),
+        "first"
+    );
+    assert!(f.join("api").exists() && f.join("web").exists());
+    assert!(has_branch(&e, &e.root.join("repos/api"), "feat/x"));
+
+    // Without the diverged repo, the rest goes through and the forest closes.
+    e.ok(&["rm", "feat/x", "web"]);
+    let r = e.forest_in(&f, &["done"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(!f.exists());
+    assert_eq!(
+        e.git(&e.root.join("repos/api"), &["log", "-1", "--format=%s"]),
+        "api work"
+    );
+}
+
+#[test]
+fn done_refuses_dirty_worktrees_and_wandering_homes() {
+    let e = Env::new();
+    let up = e.upstream("svc");
+    e.ok(&["clone", up.to_str().unwrap()]);
+    e.ok(&["new", "feat/x", "svc"]);
+    let f = forest_dir(&e, "feat-x");
+    let home = e.root.join("repos/svc");
+
+    fs::write(f.join("svc/dirty"), "x").unwrap();
+    let r = e.forest_in(&f, &["done"]);
+    assert_eq!(r.code, 2);
+    assert!(r.stderr.contains("uncommitted changes"), "{}", r.stderr);
+    fs::remove_file(f.join("svc/dirty")).unwrap();
+
+    // origin/HEAD says the default branch is main, so a home that wandered off
+    // it is refused. (Without a remote, the home's branch is by definition the
+    // default one, and done merges into it.)
+    e.git(&home, &["checkout", "-q", "-b", "elsewhere"]);
+    e.commit(&f.join("svc"), "work");
+    let r = e.forest_in(&f, &["done"]);
+    assert_eq!(r.code, 2);
+    assert!(
+        r.stderr
+            .contains("home of svc is on 'elsewhere', not 'main'"),
+        "{}",
+        r.stderr
+    );
+    e.git(&home, &["checkout", "-q", "main"]);
+
+    fs::write(home.join("dirty"), "x").unwrap();
+    let r = e.forest_in(&f, &["done"]);
+    assert_eq!(r.code, 2);
+    assert!(r.stderr.contains("home of svc"), "{}", r.stderr);
+    fs::remove_file(home.join("dirty")).unwrap();
+
+    let r = e.forest_in(&f, &["done"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(!f.exists());
+}
+
+#[test]
+fn done_delete_branch_after_the_merge() {
+    let e = Env::new();
+    let up = e.upstream("svc");
+    let repo = PathBuf::from(e.ok(&["clone", up.to_str().unwrap()]));
+    e.ok(&["new", "feat/x", "svc"]);
+    e.commit(&forest_dir(&e, "feat-x").join("svc"), "work");
+
+    let r = e.forest(&["done", "feat/x", "svc", "--delete-branch", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.json()["merged"][0]["branch_deleted"], true);
+    assert!(!has_branch(&e, &repo, "feat/x"));
+    assert_eq!(e.git(&repo, &["log", "-1", "--format=%s"]), "work");
+
+    // Even a merged default branch is never deleted.
+    e.git(&repo, &["checkout", "-q", "-b", "elsewhere"]);
+    e.ok(&["new", "main", "svc"]);
+    let r = e.forest(&["done", "main", "svc", "--delete-branch"]);
+    assert_eq!(r.code, 2);
+    assert!(r.stderr.contains("never deleted"), "{}", r.stderr);
+}
+
+#[test]
+fn done_closes_what_is_already_merged() {
+    let e = Env::new();
+    e.project("app");
+    e.ok(&["new", "feat/x", "app"]);
+    e.commit(&forest_dir(&e, "feat-x").join("app"), "work");
+    e.git(
+        &e.root.join("repos/app"),
+        &["merge", "-q", "--ff-only", "feat/x"],
+    );
+    // main moves on: the branch is behind, but contained.
+    e.commit(&e.root.join("repos/app"), "after");
+
+    let r = e.forest(&["done", "feat/x", "app", "--delete-branch", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.json()["merged"][0]["already_merged"], true);
+    assert!(!forest_dir(&e, "feat-x").exists());
+    assert!(!has_branch(&e, &e.root.join("repos/app"), "feat/x"));
+}
+
+#[test]
+fn push_makes_remote_branches() {
+    let e = Env::new();
+    let svc = e.upstream("svc");
+    let web = e.upstream("web");
+    e.ok(&["clone", svc.to_str().unwrap()]);
+    e.ok(&["clone", web.to_str().unwrap()]);
+    e.ok(&["new", "feat/x", "svc", "web"]);
+    let f = forest_dir(&e, "feat-x");
+    e.commit(&f.join("svc"), "svc work");
+    e.commit(&f.join("web"), "web work");
+
+    let r = e.forest(&["push", "feat/x", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let j = r.json();
+    assert_eq!(j["pushes"].as_array().unwrap().len(), 2);
+    assert_eq!(j["pushes"][0]["branch"], "feat/x");
+    for (repo, up) in [("svc", &svc), ("web", &web)] {
+        assert_eq!(
+            e.git(up, &["log", "-1", "--format=%s", "feat/x"]),
+            format!("{repo} work"),
+        );
+        assert_eq!(
+            e.git(&f.join(repo), &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+            "origin/feat/x"
+        );
+    }
+}
+
+#[test]
+fn push_reports_failures_per_repo() {
+    let e = Env::new();
+    let up = e.upstream("svc");
+    e.ok(&["clone", up.to_str().unwrap()]);
+    e.project("solo"); // no remote
+    e.ok(&["new", "feat/x", "svc", "solo"]);
+    let f = forest_dir(&e, "feat-x");
+    e.commit(&f.join("svc"), "work");
+    e.commit(&f.join("solo"), "work");
+
+    let r = e.forest(&["push", "feat/x", "--json"]);
+    assert_eq!(r.code, 1);
+    let j = r.json();
+    let pushes = j["pushes"].as_array().unwrap().clone();
+    assert_eq!(pushes.len(), 2);
+    let solo = pushes.iter().find(|p| p["project"] == "solo").unwrap();
+    assert!(solo["error"].is_string());
+    let svc = pushes.iter().find(|p| p["project"] == "svc").unwrap();
+    assert!(svc["error"].is_null());
+    // The repo that could push, did.
+    assert_eq!(e.git(&up, &["log", "-1", "--format=%s", "feat/x"]), "work");
 }
 
 #[test]
@@ -917,7 +1161,7 @@ fn json_identity_of_a_forest() {
         assert_eq!(r.json(), want, "{}", r.stdout);
     }
 
-    let r = e.forest(&["rm", "shop", "--json"]);
+    let r = e.forest_in(&f, &["rm", "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
     let j = r.json();
     assert_eq!(identity_of(&j), want);
@@ -994,7 +1238,7 @@ fn json_errors() {
     e.project("app");
     for args in [
         &["path", "nope", "--json"][..],
-        &["rm", "nope", "--json"],
+        &["rm", "nope", "app", "--json"],
         &["new", "x", "nope", "--json"],
     ] {
         let r = e.forest(args);
@@ -1007,7 +1251,7 @@ fn json_errors() {
     }
     let f = PathBuf::from(e.ok(&["new", "feat/x", "app"]));
     fs::write(f.join("app/dirty"), "x").unwrap();
-    let r = e.forest(&["rm", "feat/x", "--json"]);
+    let r = e.forest(&["rm", "feat/x", "app", "--json"]);
     assert_eq!(r.code, 2);
     assert_eq!(r.json()["error"]["code"], "refused");
 }

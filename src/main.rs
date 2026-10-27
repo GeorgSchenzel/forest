@@ -22,6 +22,23 @@ Targets:
   <repo>              the repo's home
   (none)              the forest or repo you are in";
 
+const WORKTREE_TARGETS: &str = "\
+Targets:
+  <forest> <repo>     that repo's worktree in the forest
+  <branch> <repo>     the repo's worktree on that branch
+  (none)              the forest or repo you are in";
+
+const DONE_HELP: &str = "\
+Everything is checked first, all or nothing: worktrees clean and on branches,
+their homes on the default branch and clean, and every merge a fast-forward (or
+already in it). Only then are the branches merged and the worktrees removed.
+Branches stay unless --delete-branch; after the merge that is always safe.
+
+Targets:
+  <forest> <repo>     that repo's worktree in the forest
+  <branch> <repo>     the repo's worktree on that branch
+  (none)              the forest or repo you are in";
+
 /// Worktree & forest manager.
 #[derive(Parser)]
 #[command(name = "forest", version, after_help = TARGETS)]
@@ -90,8 +107,8 @@ Examples:
         #[arg(long, conflicts_with = "target")]
         pick: bool,
     },
-    /// Remove a forest, or one of its worktrees
-    #[command(after_help = TARGETS)]
+    /// Remove one of a forest's worktrees, or the forest you are in
+    #[command(after_help = WORKTREE_TARGETS)]
     Rm {
         target: Option<String>,
         #[arg(value_name = "REPO", requires = "target")]
@@ -102,6 +119,23 @@ Examples:
         /// Also delete the branches, if no commit would be lost
         #[arg(long)]
         delete_branch: bool,
+    },
+    /// Merge a forest's branches into their default branches, then close it
+    #[command(after_help = DONE_HELP)]
+    Done {
+        target: Option<String>,
+        #[arg(value_name = "REPO", requires = "target")]
+        repo: Option<String>,
+        /// Also delete the branches (always safe after the merge)
+        #[arg(long)]
+        delete_branch: bool,
+    },
+    /// Push the branches of a forest's worktrees to origin
+    #[command(after_help = TARGETS)]
+    Push {
+        target: Option<String>,
+        #[arg(value_name = "REPO", requires = "target")]
+        repo: Option<String>,
     },
     /// Rename a forest (its dir; branches stay)
     Mv {
@@ -195,6 +229,14 @@ fn run(cli: Cli) -> Result<Output> {
             force,
             delete_branch,
         ),
+        Command::Done {
+            target,
+            repo,
+            delete_branch,
+        } => cmd::done::done(&layout, target.as_deref(), repo.as_deref(), delete_branch),
+        Command::Push { target, repo } => {
+            cmd::push::push(&layout, target.as_deref(), repo.as_deref())
+        }
         Command::Mv { forest, new_name } => cmd::mv::mv(&layout, &forest, &new_name),
         Command::Clean {
             dry_run,

@@ -92,8 +92,8 @@ fn candidates(layout: &Layout, words: &[String]) -> Result<Vec<String>> {
         None => layout,
     };
     Ok(match (sub.as_str(), args.len()) {
-        ("path" | "rm" | "ls", 0) => targets(layout)?,
-        ("path" | "rm", 1) => repos_of(layout, &args[0])?,
+        ("path" | "rm" | "ls" | "done" | "push", 0) => targets(layout)?,
+        ("path" | "rm" | "done" | "push", 1) => repos_of(layout, &args[0])?,
         ("mv", 0) => layout.forests()?,
         ("new", 0) => forest_branches(layout)?,
         ("new", _) => {
