@@ -3,7 +3,7 @@
   lib,
   rustPlatform,
   makeWrapper,
-  git,
+  gitMinimal,
 }:
 rustPlatform.buildRustPackage {
   pname = "forest";
@@ -25,10 +25,12 @@ rustPlatform.buildRustPackage {
 
   nativeBuildInputs = [ makeWrapper ];
 
-  # worktree and branch operations go through git
+  # worktree and branch operations go through git; gitMinimal keeps python,
+  # docs and the toolchain out of the closure, and --suffix lets a git already
+  # on PATH (with the user's credential helpers etc.) win
   postInstall = ''
     wrapProgram $out/bin/forest \
-      --prefix PATH : ${lib.makeBinPath [ git ]}
+      --suffix PATH : ${lib.makeBinPath [ gitMinimal ]}
   '';
 
   meta = {
