@@ -503,6 +503,88 @@ fn targets() {
 }
 
 #[test]
+fn add_puts_repos_into_the_forest_of_the_cwd() {
+    let e = Env::new();
+    e.project("api");
+    e.project("web");
+    e.project("db");
+    e.project("lib");
+    let f = PathBuf::from(e.ok(&["new", "feat/y", "api"]));
+
+    // From the forest root, and from inside a member checkout's subdir.
+    let r = e.forest_in(&f, &["add", "web", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.json()["forest"], "feat-y");
+    assert_eq!(r.json()["created"], false);
+    assert_eq!(e.git(&f.join("web"), &["branch", "--show-current"]), "feat/y");
+    let deep = f.join("api/deep");
+    fs::create_dir_all(&deep).unwrap();
+    let r = e.forest_in(&deep, &["add", "db", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(e.git(&f.join("db"), &["branch", "--show-current"]), "feat/y");
+
+    // A repo of the forest already: reported, not an error, on its own and
+    // beside a new one.
+    let r = e.forest_in(&f, &["add", "web", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.json()["present"], serde_json::json!(["web"]));
+    assert_eq!(r.json()["worktrees"].as_array().unwrap().len(), 0);
+    let r = e.forest_in(&f, &["add", "web", "lib", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.json()["present"], serde_json::json!(["web"]));
+    assert_eq!(e.git(&f.join("lib"), &["branch", "--show-current"]), "feat/y");
+
+    // Outside a forest, and in a repo's home: refused.
+    for cwd in [e.base.as_path(), e.root.join("repos/api").as_path()] {
+        let r = e.forest_in(cwd, &["add", "web", "--json"]);
+        assert_eq!(r.code, 2, "{cwd:?}");
+        assert_eq!(r.json()["error"]["code"], "refused");
+        let msg = r.json()["error"]["message"].as_str().unwrap().to_string();
+        assert!(msg.contains("not inside a forest"), "{msg}");
+    }
+
+    // A forest with no worktrees has no branch to add on.
+    let empty = forest_dir(&e, "empty");
+    fs::create_dir_all(&empty).unwrap();
+    let r = e.forest_in(&empty, &["add", "web"]);
+    assert_eq!(r.code, 2);
+    assert!(
+        r.stderr.contains("no worktrees yet"),
+        "should tell how to start one: {}",
+        r.stderr
+    );
+
+    // Members on different branches: refused.
+    let mixed = forest_dir(&e, "mixed");
+    fs::create_dir_all(&mixed).unwrap();
+    for (repo, branch) in [("api", "one"), ("web", "two")] {
+        e.git(
+            &e.root.join("repos").join(repo),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                mixed.join(repo).to_str().unwrap(),
+            ],
+        );
+    }
+    let r = e.forest_in(&mixed, &["add", "db"]);
+    assert_eq!(r.code, 2);
+    assert!(
+        r.stderr.contains("not on one branch"),
+        "{}",
+        r.stderr
+    );
+
+    // An unknown repo is an error, as everywhere.
+    let r = e.forest_in(&f, &["add", "nope"]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("no repo named 'nope'"), "{}", r.stderr);
+}
+
+#[test]
 fn path_steps_into_the_only_worktree() {
     let e = Env::new();
     e.project("api");

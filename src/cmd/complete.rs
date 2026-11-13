@@ -106,6 +106,11 @@ fn candidates(layout: &Layout, words: &[String]) -> Result<Vec<String>> {
             repos.retain(|p| !args.iter().skip(1).any(|a| a == p));
             repos
         }
+        ("add", _) => {
+            let mut repos = layout.projects()?;
+            repos.retain(|p| !args.contains(p));
+            repos
+        }
         ("migrate", 0) => vec![FILES.into()],
         _ => vec![],
     })

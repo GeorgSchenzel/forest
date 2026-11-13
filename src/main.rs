@@ -97,6 +97,14 @@ Examples:
         #[arg(long, conflicts_with = "alias")]
         unnamed: bool,
     },
+    /// Add repos to the forest you are in, on its branch
+    Add {
+        #[arg(value_name = "REPO", required = true)]
+        repos: Vec<String>,
+        /// Skip `fetch origin` before making the worktree
+        #[arg(long)]
+        no_fetch: bool,
+    },
     /// List repos and forests with their worktrees
     Ls {
         /// A forest (by name or branch) or a repo
@@ -242,6 +250,7 @@ fn run(cli: Cli) -> Result<Output> {
                 no_fetch,
             )
         }
+        Command::Add { repos, no_fetch } => cmd::add::add(&layout, &repos, no_fetch),
         Command::Ls { target } => cmd::ls::ls(&layout, target.as_deref()),
         Command::Path { target, repo, pick } => {
             cmd::path::path(&layout, target.as_deref(), repo.as_deref(), pick)
