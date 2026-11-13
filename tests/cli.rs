@@ -719,6 +719,58 @@ fn name_checks_everything_before_touching_anything() {
 }
 
 #[test]
+fn new_create_only_refuses_to_join_or_fill_in() {
+    let e = Env::new();
+    e.project("api");
+    e.project("web");
+    e.ok(&["new", "feat/x", "api"]);
+    let fx = forest_dir(&e, "feat-x");
+
+    // The branch is in a forest already: refused, and that forest untouched.
+    let r = e.forest(&["new", "feat/x", "web", "--create-only", "--json"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert_eq!(r.json()["error"]["code"], "refused");
+    assert!(!fx.join("web").exists());
+    let msg = r.json()["error"]["message"].as_str().unwrap().to_string();
+    assert!(
+        msg.contains("in forest 'feat-x' already"),
+        "{msg}"
+    );
+
+    // A forest dir that exists, stray or not: refused, nothing made.
+    for name in ["stray", "feat-y"] {
+        let f = forest_dir(&e, name);
+        fs::create_dir_all(&f).unwrap();
+    }
+    let r = e.forest(&["new", "feat/y", "api", "--as", "stray", "--create-only"]);
+    assert_eq!(r.code, 2);
+    assert!(
+        r.stderr.contains("stray already exists"),
+        "{}",
+        r.stderr
+    );
+    assert!(!forest_dir(&e, "stray").join("api").exists());
+    let r = e.forest(&["new", "feat/y", "api", "--create-only"]);
+    assert_eq!(r.code, 2);
+    assert!(
+        r.stderr.contains("feat-y already exists"),
+        "{}",
+        r.stderr
+    );
+    assert!(!has_branch(&e, &e.root.join("repos/api"), "feat/y"));
+
+    // On a free name it makes the forest as usual.
+    let r = e.forest(&["new", "feat/z", "api", "web", "--create-only", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.json()["created"], true);
+    assert!(forest_dir(&e, "feat-z").join("web").is_dir());
+
+    // Without --create-only, `new` joins the forest that has the branch.
+    let out = e.ok(&["new", "feat/x", "web"]);
+    assert_eq!(PathBuf::from(out), fx);
+}
+
+#[test]
 fn path_steps_into_the_only_worktree() {
     let e = Env::new();
     e.project("api");

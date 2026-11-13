@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::Output;
 use crate::cmd::path::Identity;
-use crate::error::{Result, fail};
+use crate::error::{Result, fail, refused};
 use crate::git::git;
 use crate::layout::{Layout, slug, valid_name};
 use crate::project::{
@@ -67,6 +67,7 @@ pub fn new(
     alias: Option<&str>,
     from: Option<&str>,
     no_fetch: bool,
+    create_only: bool,
 ) -> Result<Output> {
     if let Some(b) = branch {
         check_branch_name(b)?;
@@ -85,6 +86,14 @@ pub fn new(
         None => wip_name(layout, &all, &unique)?,
     };
     let holding = forests_on(&all, layout, &branch);
+    // --create-only never joins: a branch a forest has, or a dir that exists,
+    // is refused instead, so scripts never land in someone else's forest.
+    if create_only && !holding.is_empty() {
+        return Err(refused!(
+            "'{branch}' is in forest '{}' already; --create-only never joins one",
+            holding[0]
+        ));
+    }
     let (name, created) = match holding.as_slice() {
         [f] => {
             if let Some(a) = alias.filter(|a| a != f) {
@@ -96,6 +105,15 @@ pub fn new(
         }
         [] => {
             let name = alias.map_or_else(|| slug(&branch), str::to_string);
+            if create_only {
+                let dir = layout.forest_dir(&name);
+                if dir.exists() {
+                    return Err(refused!(
+                        "{} already exists; --create-only never adds to it",
+                        dir.display()
+                    ));
+                }
+            }
             check_new_name(layout, &all, &name, None)?;
             (name, true)
         }

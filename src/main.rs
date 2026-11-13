@@ -93,6 +93,9 @@ Examples:
         /// Skip `fetch origin` before making the worktree
         #[arg(long)]
         no_fetch: bool,
+        /// Refuse instead of joining a forest that exists already
+        #[arg(long)]
+        create_only: bool,
         /// Start without a name, on a generated wip branch
         #[arg(long, conflicts_with = "alias")]
         unnamed: bool,
@@ -233,6 +236,7 @@ fn run(cli: Cli) -> Result<Output> {
             alias,
             from,
             no_fetch,
+            create_only,
             unnamed,
         } => {
             // With --unnamed the branch's place holds the first repo.
@@ -253,6 +257,7 @@ fn run(cli: Cli) -> Result<Output> {
                 alias.as_deref(),
                 from.as_deref(),
                 no_fetch,
+                create_only,
             )
         }
         Command::Add { repos, no_fetch } => cmd::add::add(&layout, &repos, no_fetch),

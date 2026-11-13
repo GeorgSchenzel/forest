@@ -52,6 +52,7 @@ pub fn add(layout: &Layout, repos: &[String], no_fetch: bool) -> Result<Output> 
         None,
         None,
         no_fetch,
+        false,
     )?;
     for p in &present {
         eprintln!("{p}: already in forest '{forest}'");
