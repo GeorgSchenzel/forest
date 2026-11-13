@@ -585,6 +585,140 @@ fn add_puts_repos_into_the_forest_of_the_cwd() {
 }
 
 #[test]
+fn name_renames_the_branch_of_every_member() {
+    let e = Env::new();
+    e.project("api");
+    e.project("web");
+    let f = PathBuf::from(e.ok(&["new", "feat/y", "api", "web"]));
+
+    let r = e.forest_in(&f, &["name", "feat/z", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let j = r.json();
+    assert_eq!(j["old"], "feat/y");
+    assert_eq!(j["new"], "feat/z");
+    assert_eq!(j["forest"], "feat-y");
+    assert_eq!(j["branch"], "feat/z");
+    assert_eq!(j["worktrees"].as_array().unwrap().len(), 2);
+    for p in ["api", "web"] {
+        assert_eq!(e.git(&f.join(p), &["branch", "--show-current"]), "feat/z");
+        assert!(has_branch(&e, &e.root.join("repos").join(p), "feat/z"));
+        assert!(!has_branch(&e, &e.root.join("repos").join(p), "feat/y"));
+    }
+    // The dir is not renamed; the work is found under the new branch.
+    assert!(f.is_dir() && !forest_dir(&e, "feat-z").exists());
+    assert_eq!(e.ok(&["path", "feat/z"]), f.to_str().unwrap());
+    let j = e.forest(&["ls", "feat-y", "--json"]).json();
+    assert_eq!(j["forests"][0]["branch"], "feat/z");
+    // No upstream, no warnings.
+    assert!(r.json().get("warnings").is_none());
+
+    // The text output hints at renaming the folder later.
+    let r = e.forest_in(&f, &["name", "feat/w"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stdout.contains("the folder keeps its name"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("forest mv feat-y feat-w"),
+        "{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn name_warns_when_the_old_branch_tracked_a_remote() {
+    let e = Env::new();
+    let up = e.upstream("svc");
+    e.git(&up, &["branch", "feat/remote"]);
+    e.ok(&["clone", up.to_str().unwrap()]);
+    let f = PathBuf::from(e.ok(&["new", "feat/remote", "svc", "--no-fetch"]));
+
+    let r = e.forest_in(&f, &["name", "feat/renamed", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.json()["warnings"].as_array().unwrap().len(), 1);
+    // git moved the upstream config to the renamed branch.
+    assert_eq!(
+        e.git(&f.join("svc"), &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+        "origin/feat/remote"
+    );
+}
+
+#[test]
+fn name_checks_everything_before_touching_anything() {
+    let e = Env::new();
+    e.project("api");
+    e.project("web");
+    e.project("lib");
+    let f = PathBuf::from(e.ok(&["new", "feat/y", "api", "web"]));
+    let branch = |repo: &str| e.git(&f.join(repo), &["branch", "--show-current"]);
+
+    // Not from inside a forest.
+    let r = e.forest(&["name", "feat/z", "--json"]);
+    assert_eq!(r.code, 2);
+    assert_eq!(r.json()["error"]["code"], "refused");
+
+    // An invalid branch name.
+    let r = e.forest_in(&f, &["name", "bad..name"]);
+    assert_eq!(r.code, 2);
+    assert!(r.stderr.contains("invalid branch"), "{}", r.stderr);
+    assert_eq!(branch("api"), "feat/y");
+
+    // The new branch exists in a member's repo.
+    e.git(&e.root.join("repos/web"), &["branch", "feat/keep", "main"]);
+    let r = e.forest_in(&f, &["name", "feat/keep"]);
+    assert_eq!(r.code, 2);
+    assert!(
+        r.stderr.contains("exists in web already"),
+        "{}",
+        r.stderr
+    );
+    assert_eq!(branch("api"), "feat/y");
+
+    // A repo name, another forest's dir name, another forest's branch.
+    e.ok(&["new", "other", "lib"]);
+    e.ok(&["new", "feat/theirs", "lib", "--as", "theirs-forest"]);
+    for (target, msg) in [
+        ("api", "a repo is named"),
+        ("other", "a forest is named"),
+        ("feat/theirs", "is the branch of forest 'theirs-forest'"),
+        ("feat/y", "already"),
+    ] {
+        let r = e.forest_in(&f, &["name", target]);
+        assert_eq!(r.code, 2, "{target}");
+        assert!(r.stderr.contains(msg), "{target}: {}", r.stderr);
+    }
+    assert_eq!(branch("api"), "feat/y");
+    assert_eq!(branch("web"), "feat/y");
+
+    // Members on different branches: refused.
+    let mixed = forest_dir(&e, "mixed");
+    fs::create_dir_all(&mixed).unwrap();
+    for (repo, b) in [("api", "one"), ("web", "two")] {
+        e.git(
+            &e.root.join("repos").join(repo),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                b,
+                mixed.join(repo).to_str().unwrap(),
+            ],
+        );
+    }
+    let r = e.forest_in(&mixed, &["name", "feat/x"]);
+    assert_eq!(r.code, 2);
+    assert!(
+        r.stderr.contains("not on one branch"),
+        "{}",
+        r.stderr
+    );
+    assert_eq!(e.git(&mixed.join("api"), &["branch", "--show-current"]), "one");
+}
+
+#[test]
 fn path_steps_into_the_only_worktree() {
     let e = Env::new();
     e.project("api");

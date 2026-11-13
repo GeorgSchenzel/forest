@@ -158,6 +158,11 @@ Examples:
         forest: String,
         new_name: String,
     },
+    /// Name this forest's work: renames the branch of its worktrees
+    Name {
+        #[arg(value_name = "BRANCH")]
+        branch: String,
+    },
     /// Remove every forest whose work is done
     #[command(after_help = "\
 A forest is done when none of its worktrees has uncommitted changes, and each
@@ -276,6 +281,7 @@ fn run(cli: Cli) -> Result<Output> {
             cmd::push::push(&layout, target.as_deref(), repo.as_deref())
         }
         Command::Mv { forest, new_name } => cmd::mv::mv(&layout, &forest, &new_name),
+        Command::Name { branch } => cmd::name::name(&layout, &branch),
         Command::Clean {
             dry_run,
             delete_branch,
