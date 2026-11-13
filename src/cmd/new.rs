@@ -63,6 +63,7 @@ pub fn new(
     projects: &[String],
     alias: Option<&str>,
     from: Option<&str>,
+    no_fetch: bool,
 ) -> Result<Output> {
     check_branch_name(branch)?;
     let mut unique: Vec<&String> = Vec::new();
@@ -107,7 +108,7 @@ pub fn new(
     let mut made: Vec<(&str, PathBuf, Start)> = Vec::new();
     for p in &unique {
         let path = dir.join(p);
-        match create_worktree(layout, p, branch, &path, from) {
+        match create_worktree(layout, p, branch, &path, from, no_fetch) {
             Ok(start) => {
                 start.report(p, branch);
                 made.push((p, path, start));
@@ -187,13 +188,15 @@ fn check_project(layout: &Layout, project: &str) -> Result<()> {
 }
 
 /// Makes `path` a new worktree of `project` on `branch`. `from` is only for a new
-/// branch, and must exist.
+/// branch, and must exist. `no_fetch` skips `fetch origin`, for when something
+/// else keeps the repo fresh (or nothing should wait on the network).
 fn create_worktree(
     layout: &Layout,
     project: &str,
     branch: &str,
     path: &Path,
     from: Option<&str>,
+    no_fetch: bool,
 ) -> Result<Start> {
     let repo = layout.repo_dir(project);
     // Pruned first, so a deleted worktree can be made again.
@@ -211,7 +214,7 @@ fn create_worktree(
         ));
     }
 
-    if origin_url(&repo).is_some() {
+    if !no_fetch && origin_url(&repo).is_some() {
         fetch(&repo)?;
     }
     let remote = format!("origin/{branch}");

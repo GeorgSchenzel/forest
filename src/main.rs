@@ -89,6 +89,9 @@ Examples:
         /// Start a new branch from this ref instead of the default branch
         #[arg(long, value_name = "REF")]
         from: Option<String>,
+        /// Skip `fetch origin` before making the worktree
+        #[arg(long)]
+        no_fetch: bool,
     },
     /// List repos and forests with their worktrees
     Ls {
@@ -212,7 +215,15 @@ fn run(cli: Cli) -> Result<Output> {
             repos,
             alias,
             from,
-        } => cmd::new::new(&layout, &branch, &repos, alias.as_deref(), from.as_deref()),
+            no_fetch,
+        } => cmd::new::new(
+            &layout,
+            &branch,
+            &repos,
+            alias.as_deref(),
+            from.as_deref(),
+            no_fetch,
+        ),
         Command::Ls { target } => cmd::ls::ls(&layout, target.as_deref()),
         Command::Path { target, repo, pick } => {
             cmd::path::path(&layout, target.as_deref(), repo.as_deref(), pick)

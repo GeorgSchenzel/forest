@@ -258,6 +258,39 @@ fn new_reports_how_the_branch_was_set_up() {
 }
 
 #[test]
+fn new_no_fetch_leaves_the_remote_where_it_was() {
+    let e = Env::new();
+    let up = e.upstream("svc");
+    e.git(&up, &["branch", "feat/remote"]);
+    let repo = PathBuf::from(e.ok(&["clone", up.to_str().unwrap()]));
+    let fetched = e.git(&repo, &["rev-parse", "origin/feat/remote"]);
+    // The upstream moves ahead after the clone fetched it.
+    e.git(&up, &["checkout", "-q", "feat/remote"]);
+    e.commit(&up, "second");
+    e.git(&up, &["checkout", "-q", "main"]);
+
+    // --no-fetch: the tracking ref stays where the clone left it, and the
+    // worktree is made from that state.
+    let f = PathBuf::from(e.ok(&["new", "feat/remote", "svc", "--no-fetch"]));
+    assert_eq!(
+        e.git(&repo, &["rev-parse", "origin/feat/remote"]),
+        fetched,
+        "the tracking ref moved"
+    );
+    assert_eq!(
+        e.git(&f.join("svc"), &["log", "-1", "--format=%s"]),
+        "first"
+    );
+
+    // Without it, `new` fetches, and the same ref catches up.
+    e.ok(&["new", "feat/other", "svc"]);
+    assert_eq!(
+        e.git(&repo, &["rev-parse", "origin/feat/remote"]),
+        e.git(&up, &["rev-parse", "feat/remote"])
+    );
+}
+
+#[test]
 fn new_adds_to_the_forest_of_its_branch() {
     let e = Env::new();
     e.project("api");
