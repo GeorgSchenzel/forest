@@ -307,11 +307,7 @@ fn default_base(repo: &Path, project: &str) -> Result<String> {
 /// A name for a forest that starts without one: `wip-<MMDD>-<4 [a-z0-9]>`, its
 /// branch as much as its dir. A name that is taken already is retried a few
 /// times; with 36^4 names a day, one is always free.
-fn wip_name(
-    layout: &Layout,
-    all: &[(String, Worktree)],
-    projects: &[&String],
-) -> Result<String> {
+fn wip_name(layout: &Layout, all: &[(String, Worktree)], projects: &[&String]) -> Result<String> {
     let (month, day) = month_day(now_days());
     for _ in 0..8 {
         let name = format!("wip-{month:02}{day:02}-{}", wip_suffix(4));
@@ -363,7 +359,7 @@ fn wip_suffix(n: usize) -> String {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as u64))
         .rotate_left(32)
-        ^ u64::from(std::process::id());
+            ^ u64::from(std::process::id());
         for b in &mut bytes {
             x = x
                 .wrapping_mul(6364136223846793005)

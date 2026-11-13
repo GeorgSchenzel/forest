@@ -327,7 +327,10 @@ fn new_unnamed_starts_a_wip_forest() {
     assert!(other.starts_with("wip-"), "{other}");
     assert_ne!(other, name);
     assert_eq!(
-        e.git(&forest_dir(&e, &other).join("bento"), &["branch", "--show-current"]),
+        e.git(
+            &forest_dir(&e, &other).join("bento"),
+            &["branch", "--show-current"]
+        ),
         other
     );
 
@@ -516,12 +519,18 @@ fn add_puts_repos_into_the_forest_of_the_cwd() {
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert_eq!(r.json()["forest"], "feat-y");
     assert_eq!(r.json()["created"], false);
-    assert_eq!(e.git(&f.join("web"), &["branch", "--show-current"]), "feat/y");
+    assert_eq!(
+        e.git(&f.join("web"), &["branch", "--show-current"]),
+        "feat/y"
+    );
     let deep = f.join("api/deep");
     fs::create_dir_all(&deep).unwrap();
     let r = e.forest_in(&deep, &["add", "db", "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
-    assert_eq!(e.git(&f.join("db"), &["branch", "--show-current"]), "feat/y");
+    assert_eq!(
+        e.git(&f.join("db"), &["branch", "--show-current"]),
+        "feat/y"
+    );
 
     // A repo of the forest already: reported, not an error, on its own and
     // beside a new one.
@@ -532,7 +541,10 @@ fn add_puts_repos_into_the_forest_of_the_cwd() {
     let r = e.forest_in(&f, &["add", "web", "lib", "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert_eq!(r.json()["present"], serde_json::json!(["web"]));
-    assert_eq!(e.git(&f.join("lib"), &["branch", "--show-current"]), "feat/y");
+    assert_eq!(
+        e.git(&f.join("lib"), &["branch", "--show-current"]),
+        "feat/y"
+    );
 
     // Outside a forest, and in a repo's home: refused.
     for cwd in [e.base.as_path(), e.root.join("repos/api").as_path()] {
@@ -572,11 +584,7 @@ fn add_puts_repos_into_the_forest_of_the_cwd() {
     }
     let r = e.forest_in(&mixed, &["add", "db"]);
     assert_eq!(r.code, 2);
-    assert!(
-        r.stderr.contains("not on one branch"),
-        "{}",
-        r.stderr
-    );
+    assert!(r.stderr.contains("not on one branch"), "{}", r.stderr);
 
     // An unknown repo is an error, as everywhere.
     let r = e.forest_in(&f, &["add", "nope"]);
@@ -620,11 +628,7 @@ fn name_renames_the_branch_of_every_member() {
         "{}",
         r.stdout
     );
-    assert!(
-        r.stdout.contains("forest mv feat-y feat-w"),
-        "{}",
-        r.stdout
-    );
+    assert!(r.stdout.contains("forest mv feat-y feat-w"), "{}", r.stdout);
 }
 
 #[test]
@@ -640,7 +644,10 @@ fn name_warns_when_the_old_branch_tracked_a_remote() {
     assert_eq!(r.json()["warnings"].as_array().unwrap().len(), 1);
     // git moved the upstream config to the renamed branch.
     assert_eq!(
-        e.git(&f.join("svc"), &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+        e.git(
+            &f.join("svc"),
+            &["rev-parse", "--abbrev-ref", "@{upstream}"]
+        ),
         "origin/feat/remote"
     );
 }
@@ -669,11 +676,7 @@ fn name_checks_everything_before_touching_anything() {
     e.git(&e.root.join("repos/web"), &["branch", "feat/keep", "main"]);
     let r = e.forest_in(&f, &["name", "feat/keep"]);
     assert_eq!(r.code, 2);
-    assert!(
-        r.stderr.contains("exists in web already"),
-        "{}",
-        r.stderr
-    );
+    assert!(r.stderr.contains("exists in web already"), "{}", r.stderr);
     assert_eq!(branch("api"), "feat/y");
 
     // A repo name, another forest's dir name, another forest's branch.
@@ -710,12 +713,11 @@ fn name_checks_everything_before_touching_anything() {
     }
     let r = e.forest_in(&mixed, &["name", "feat/x"]);
     assert_eq!(r.code, 2);
-    assert!(
-        r.stderr.contains("not on one branch"),
-        "{}",
-        r.stderr
+    assert!(r.stderr.contains("not on one branch"), "{}", r.stderr);
+    assert_eq!(
+        e.git(&mixed.join("api"), &["branch", "--show-current"]),
+        "one"
     );
-    assert_eq!(e.git(&mixed.join("api"), &["branch", "--show-current"]), "one");
 }
 
 #[test]
@@ -732,10 +734,7 @@ fn new_create_only_refuses_to_join_or_fill_in() {
     assert_eq!(r.json()["error"]["code"], "refused");
     assert!(!fx.join("web").exists());
     let msg = r.json()["error"]["message"].as_str().unwrap().to_string();
-    assert!(
-        msg.contains("in forest 'feat-x' already"),
-        "{msg}"
-    );
+    assert!(msg.contains("in forest 'feat-x' already"), "{msg}");
 
     // A forest dir that exists, stray or not: refused, nothing made.
     for name in ["stray", "feat-y"] {
@@ -744,19 +743,11 @@ fn new_create_only_refuses_to_join_or_fill_in() {
     }
     let r = e.forest(&["new", "feat/y", "api", "--as", "stray", "--create-only"]);
     assert_eq!(r.code, 2);
-    assert!(
-        r.stderr.contains("stray already exists"),
-        "{}",
-        r.stderr
-    );
+    assert!(r.stderr.contains("stray already exists"), "{}", r.stderr);
     assert!(!forest_dir(&e, "stray").join("api").exists());
     let r = e.forest(&["new", "feat/y", "api", "--create-only"]);
     assert_eq!(r.code, 2);
-    assert!(
-        r.stderr.contains("feat-y already exists"),
-        "{}",
-        r.stderr
-    );
+    assert!(r.stderr.contains("feat-y already exists"), "{}", r.stderr);
     assert!(!has_branch(&e, &e.root.join("repos/api"), "feat/y"));
 
     // On a free name it makes the forest as usual.
@@ -857,7 +848,10 @@ fn completion() {
     assert_eq!(complete(&e, &["forest", "mv", ""]), ["feat-x", "shop"]);
     assert_eq!(complete(&e, &["forest", "new", ""]), ["feat/x", "feat/y"]);
     // After --unnamed the first word is a repo, and a typed repo is done.
-    assert_eq!(complete(&e, &["forest", "new", "--unnamed", ""]), ["api", "web"]);
+    assert_eq!(
+        complete(&e, &["forest", "new", "--unnamed", ""]),
+        ["api", "web"]
+    );
     assert_eq!(
         complete(&e, &["forest", "new", "--unnamed", "api", ""]),
         ["web"]

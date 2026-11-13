@@ -7,7 +7,9 @@ use crate::cmd::path::Identity;
 use crate::error::{Result, fail, refused};
 use crate::git::{git, git_out};
 use crate::layout::{Context, Layout, slug};
-use crate::project::{all_worktrees, check_branch_name, forests_on, members, one_branch, ref_exists};
+use crate::project::{
+    all_worktrees, check_branch_name, forests_on, members, one_branch, ref_exists,
+};
 
 /// Renames the branch of every worktree in the forest of the cwd. Everything is
 /// checked first, so a forest is never half-renamed. The forest's dir keeps its
@@ -68,10 +70,7 @@ pub fn name(layout: &Layout, new: &str) -> Result<Output> {
         } else {
             format!("renamed {old} to {new} in {}", done.join(", "))
         };
-        return Err(fail!(
-            "{done}; failed:\n{}",
-            errors.join("\n")
-        ));
+        return Err(fail!("{done}; failed:\n{}", errors.join("\n")));
     }
 
     let dir = layout.forest_dir(&forest);

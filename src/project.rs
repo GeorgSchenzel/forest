@@ -102,7 +102,8 @@ pub fn one_branch(forest: &str, members: &[(String, Worktree)]) -> Result<String
              start one with `forest new <branch> <repo>…`"
         ));
     }
-    let mut branches: Vec<Option<&str>> = members.iter().map(|(_, w)| w.branch.as_deref()).collect();
+    let mut branches: Vec<Option<&str>> =
+        members.iter().map(|(_, w)| w.branch.as_deref()).collect();
     branches.sort_unstable();
     branches.dedup();
     if let [Some(only)] = branches[..] {
@@ -111,10 +112,7 @@ pub fn one_branch(forest: &str, members: &[(String, Worktree)]) -> Result<String
     if branches.iter().all(Option::is_none) {
         return Err(refused!("no worktree of forest '{forest}' is on a branch"));
     }
-    let shown: Vec<&str> = branches
-        .iter()
-        .map(|b| b.unwrap_or("(detached)"))
-        .collect();
+    let shown: Vec<&str> = branches.iter().map(|b| b.unwrap_or("(detached)")).collect();
     Err(refused!(
         "the worktrees of forest '{forest}' are not on one branch: {}",
         shown.join(", ")
