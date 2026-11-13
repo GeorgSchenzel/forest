@@ -11,7 +11,7 @@ use clap::error::ErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{Map, Value, json};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, fail};
 use crate::layout::Layout;
 
 const TARGETS: &str = "\
@@ -78,10 +78,11 @@ The forest is the one already on the branch, else a new one named after it.
 Examples:
   forest new feat/x api                  forests/feat-x/api/
   forest new feat/x web                  adds forests/feat-x/web/
-  forest new feat/y api web --as shop    forests/shop/{api,web}/, on feat/y")]
+  forest new feat/y api web --as shop    forests/shop/{api,web}/, on feat/y
+  forest new --unnamed api web           forests/wip-0412-k3xa/, a fresh wip branch")]
     New {
-        branch: String,
-        #[arg(value_name = "REPO", required = true)]
+        branch: Option<String>,
+        #[arg(value_name = "REPO")]
         repos: Vec<String>,
         /// Name a new forest (default: the branch, with '/' as '-')
         #[arg(long = "as", value_name = "NAME")]
@@ -92,6 +93,9 @@ Examples:
         /// Skip `fetch origin` before making the worktree
         #[arg(long)]
         no_fetch: bool,
+        /// Start without a name, on a generated wip branch
+        #[arg(long, conflicts_with = "alias")]
+        unnamed: bool,
     },
     /// List repos and forests with their worktrees
     Ls {
@@ -216,14 +220,28 @@ fn run(cli: Cli) -> Result<Output> {
             alias,
             from,
             no_fetch,
-        } => cmd::new::new(
-            &layout,
-            &branch,
-            &repos,
-            alias.as_deref(),
-            from.as_deref(),
-            no_fetch,
-        ),
+            unnamed,
+        } => {
+            // With --unnamed the branch's place holds the first repo.
+            let repos: Vec<String> = if unnamed {
+                branch.iter().chain(repos.iter()).cloned().collect()
+            } else {
+                repos
+            };
+            if repos.is_empty() {
+                return Err(fail!(
+                    "name the branch and the repos: `forest new <branch> <repo>…`, or start without a name: `forest new --unnamed <repo>…`"
+                ));
+            }
+            cmd::new::new(
+                &layout,
+                branch.as_deref().filter(|_| !unnamed),
+                &repos,
+                alias.as_deref(),
+                from.as_deref(),
+                no_fetch,
+            )
+        }
         Command::Ls { target } => cmd::ls::ls(&layout, target.as_deref()),
         Command::Path { target, repo, pick } => {
             cmd::path::path(&layout, target.as_deref(), repo.as_deref(), pick)

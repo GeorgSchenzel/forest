@@ -291,6 +291,54 @@ fn new_no_fetch_leaves_the_remote_where_it_was() {
 }
 
 #[test]
+fn new_unnamed_starts_a_wip_forest() {
+    let e = Env::new();
+    e.project("bento");
+    e.project("ois");
+
+    // The clap trap: with the branch optional, the first repo lands in the
+    // branch's place, so --unnamed takes it back as a repo.
+    let r = e.forest(&["new", "--unnamed", "bento", "ois", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let j = r.json();
+    let name = j["forest"].as_str().unwrap().to_string();
+    assert_eq!(j["created"], true);
+    assert_eq!(j["branch"].as_str().unwrap(), name);
+    assert!(name.starts_with("wip-"), "{name}");
+    let (md, tail) = name["wip-".len()..].split_once('-').unwrap();
+    assert_eq!(md.len(), 4);
+    assert!(md.chars().all(|c| c.is_ascii_digit()), "{name}");
+    assert_eq!(tail.len(), 4);
+    assert!(
+        tail.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+        "{name}"
+    );
+    let f = forest_dir(&e, &name);
+    assert_eq!(j["path"], f.to_str().unwrap());
+    for p in ["bento", "ois"] {
+        assert_eq!(e.git(&f.join(p), &["branch", "--show-current"]), name);
+    }
+
+    // One repo only works too, and a second forest gets another name.
+    let r = e.forest(&["new", "--unnamed", "bento", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let other = r.json()["forest"].as_str().unwrap().to_string();
+    assert!(other.starts_with("wip-"), "{other}");
+    assert_ne!(other, name);
+    assert_eq!(
+        e.git(&forest_dir(&e, &other).join("bento"), &["branch", "--show-current"]),
+        other
+    );
+
+    // --as names a forest; --unnamed makes up its own name.
+    assert_eq!(e.forest(&["new", "--unnamed", "ois", "--as", "x"]).code, 1);
+    // A branch without repos, and --unnamed without repos, are usage errors.
+    assert_eq!(e.forest(&["new", "feat/x"]).code, 1);
+    assert_eq!(e.forest(&["new", "--unnamed"]).code, 1);
+}
+
+#[test]
 fn new_adds_to_the_forest_of_its_branch() {
     let e = Env::new();
     e.project("api");
@@ -540,6 +588,8 @@ fn completion() {
 
     assert_eq!(complete(&e, &["forest", "mv", ""]), ["feat-x", "shop"]);
     assert_eq!(complete(&e, &["forest", "new", ""]), ["feat/x", "feat/y"]);
+    // After --unnamed the first word is a repo.
+    assert_eq!(complete(&e, &["forest", "new", "--unnamed", ""]), ["api", "web"]);
     assert_eq!(complete(&e, &["forest", "new", "b", "api", ""]), ["web"]);
     // A flag's value is skipped, and isn't a positional.
     assert_eq!(
