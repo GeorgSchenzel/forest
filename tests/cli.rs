@@ -856,8 +856,12 @@ fn completion() {
 
     assert_eq!(complete(&e, &["forest", "mv", ""]), ["feat-x", "shop"]);
     assert_eq!(complete(&e, &["forest", "new", ""]), ["feat/x", "feat/y"]);
-    // After --unnamed the first word is a repo.
+    // After --unnamed the first word is a repo, and a typed repo is done.
     assert_eq!(complete(&e, &["forest", "new", "--unnamed", ""]), ["api", "web"]);
+    assert_eq!(
+        complete(&e, &["forest", "new", "--unnamed", "api", ""]),
+        ["web"]
+    );
     assert_eq!(complete(&e, &["forest", "new", "b", "api", ""]), ["web"]);
     // A flag's value is skipped, and isn't a positional.
     assert_eq!(

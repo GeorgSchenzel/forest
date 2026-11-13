@@ -99,11 +99,11 @@ fn candidates(layout: &Layout, words: &[String]) -> Result<Vec<String>> {
         ("path" | "rm" | "ls" | "done" | "push", 0) => targets(layout)?,
         ("path" | "rm" | "done" | "push", 1) => repos_of(layout, &args[0])?,
         ("mv", 0) => layout.forests()?,
-        // With --unnamed every word is a repo.
+        // With --unnamed every word is a repo; without it the first is the branch.
         ("new", 0) if !unnamed => forest_branches(layout)?,
         ("new", _) => {
             let mut repos = layout.projects()?;
-            repos.retain(|p| !args.iter().skip(1).any(|a| a == p));
+            repos.retain(|p| !args.iter().skip(usize::from(!unnamed)).any(|a| a == p));
             repos
         }
         ("add", _) => {
