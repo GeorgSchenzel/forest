@@ -47,3 +47,8 @@ macro_rules! fail {
     ($($arg:tt)*) => { $crate::error::Error::Fail(format!($($arg)*)) };
 }
 pub(crate) use fail;
+
+macro_rules! refused {
+    ($($arg:tt)*) => { $crate::error::Error::Refused(format!($($arg)*)) };
+}
+pub(crate) use refused;

@@ -35,6 +35,7 @@ fn candidates(layout: &Layout, words: &[String]) -> Result<Vec<String>> {
     };
     let cli = crate::Cli::command();
     let mut root = None;
+    let mut unnamed = false;
     // `fcd` takes what `forest path` takes.
     let fcd = Path::new(program).file_name().is_some_and(|n| n == "fcd");
     let mut sub = fcd.then(|| "path".to_string());
@@ -57,6 +58,9 @@ fn candidates(layout: &Layout, words: &[String]) -> Result<Vec<String>> {
             };
             if flag == "--root" {
                 root = value.map(PathBuf::from);
+            }
+            if flag == "--unnamed" {
+                unnamed = true;
             }
         } else if sub.is_none() {
             sub = Some(w.clone());
@@ -95,10 +99,16 @@ fn candidates(layout: &Layout, words: &[String]) -> Result<Vec<String>> {
         ("path" | "rm" | "ls" | "done" | "push", 0) => targets(layout)?,
         ("path" | "rm" | "done" | "push", 1) => repos_of(layout, &args[0])?,
         ("mv", 0) => layout.forests()?,
-        ("new", 0) => forest_branches(layout)?,
+        // With --unnamed every word is a repo; without it the first is the branch.
+        ("new", 0) if !unnamed => forest_branches(layout)?,
         ("new", _) => {
             let mut repos = layout.projects()?;
-            repos.retain(|p| !args[1..].contains(p));
+            repos.retain(|p| !args.iter().skip(usize::from(!unnamed)).any(|a| a == p));
+            repos
+        }
+        ("add", _) => {
+            let mut repos = layout.projects()?;
+            repos.retain(|p| !args.contains(p));
             repos
         }
         ("migrate", 0) => vec![FILES.into()],

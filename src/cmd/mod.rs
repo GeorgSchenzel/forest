@@ -1,9 +1,11 @@
+pub mod add;
 pub mod clean;
 pub mod complete;
 pub mod done;
 pub mod ls;
 pub mod migrate;
 pub mod mv;
+pub mod name;
 pub mod new;
 pub mod path;
 pub mod pick;

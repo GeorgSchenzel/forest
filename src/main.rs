@@ -11,7 +11,7 @@ use clap::error::ErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{Map, Value, json};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, fail};
 use crate::layout::Layout;
 
 const TARGETS: &str = "\
@@ -78,10 +78,11 @@ The forest is the one already on the branch, else a new one named after it.
 Examples:
   forest new feat/x api                  forests/feat-x/api/
   forest new feat/x web                  adds forests/feat-x/web/
-  forest new feat/y api web --as shop    forests/shop/{api,web}/, on feat/y")]
+  forest new feat/y api web --as shop    forests/shop/{api,web}/, on feat/y
+  forest new --unnamed api web           forests/wip-0412-k3xa/, a fresh wip branch")]
     New {
-        branch: String,
-        #[arg(value_name = "REPO", required = true)]
+        branch: Option<String>,
+        #[arg(value_name = "REPO")]
         repos: Vec<String>,
         /// Name a new forest (default: the branch, with '/' as '-')
         #[arg(long = "as", value_name = "NAME")]
@@ -89,6 +90,23 @@ Examples:
         /// Start a new branch from this ref instead of the default branch
         #[arg(long, value_name = "REF")]
         from: Option<String>,
+        /// Skip `fetch origin` before making the worktree
+        #[arg(long)]
+        no_fetch: bool,
+        /// Refuse instead of joining a forest that exists already
+        #[arg(long)]
+        create_only: bool,
+        /// Start without a name, on a generated wip branch
+        #[arg(long, conflicts_with = "alias")]
+        unnamed: bool,
+    },
+    /// Add repos to the forest you are in, on its branch
+    Add {
+        #[arg(value_name = "REPO", required = true)]
+        repos: Vec<String>,
+        /// Skip `fetch origin` before making the worktree
+        #[arg(long)]
+        no_fetch: bool,
     },
     /// List repos and forests with their worktrees
     Ls {
@@ -142,6 +160,11 @@ Examples:
         /// A forest, by its name or its branch
         forest: String,
         new_name: String,
+    },
+    /// Name this forest's work: renames the branch of its worktrees
+    Name {
+        #[arg(value_name = "BRANCH")]
+        branch: String,
     },
     /// Remove every forest whose work is done
     #[command(after_help = "\
@@ -212,7 +235,32 @@ fn run(cli: Cli) -> Result<Output> {
             repos,
             alias,
             from,
-        } => cmd::new::new(&layout, &branch, &repos, alias.as_deref(), from.as_deref()),
+            no_fetch,
+            create_only,
+            unnamed,
+        } => {
+            // With --unnamed the branch's place holds the first repo.
+            let repos: Vec<String> = if unnamed {
+                branch.iter().chain(repos.iter()).cloned().collect()
+            } else {
+                repos
+            };
+            if repos.is_empty() {
+                return Err(fail!(
+                    "name the branch and the repos: `forest new <branch> <repo>…`, or start without a name: `forest new --unnamed <repo>…`"
+                ));
+            }
+            cmd::new::new(
+                &layout,
+                branch.as_deref().filter(|_| !unnamed),
+                &repos,
+                alias.as_deref(),
+                from.as_deref(),
+                no_fetch,
+                create_only,
+            )
+        }
+        Command::Add { repos, no_fetch } => cmd::add::add(&layout, &repos, no_fetch),
         Command::Ls { target } => cmd::ls::ls(&layout, target.as_deref()),
         Command::Path { target, repo, pick } => {
             cmd::path::path(&layout, target.as_deref(), repo.as_deref(), pick)
@@ -238,6 +286,7 @@ fn run(cli: Cli) -> Result<Output> {
             cmd::push::push(&layout, target.as_deref(), repo.as_deref())
         }
         Command::Mv { forest, new_name } => cmd::mv::mv(&layout, &forest, &new_name),
+        Command::Name { branch } => cmd::name::name(&layout, &branch),
         Command::Clean {
             dry_run,
             delete_branch,

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::{Result, fail};
+use crate::error::{Result, fail, refused};
 use crate::git::{git, git_loud, git_ok, git_out, relative_paths};
 use crate::layout::{Layout, canonical};
 
@@ -91,6 +91,32 @@ pub fn forests_on(all: &[(String, Worktree)], layout: &Layout, branch: &str) -> 
     found.sort();
     found.dedup();
     found
+}
+
+/// The one branch a forest's worktrees are all on: a forest works as one unit
+/// only then, and `add` and `name` refuse otherwise.
+pub fn one_branch(forest: &str, members: &[(String, Worktree)]) -> Result<String> {
+    if members.is_empty() {
+        return Err(refused!(
+            "forest '{forest}' has no worktrees yet, so there is no branch to add to; \
+             start one with `forest new <branch> <repo>…`"
+        ));
+    }
+    let mut branches: Vec<Option<&str>> =
+        members.iter().map(|(_, w)| w.branch.as_deref()).collect();
+    branches.sort_unstable();
+    branches.dedup();
+    if let [Some(only)] = branches[..] {
+        return Ok(only.to_string());
+    }
+    if branches.iter().all(Option::is_none) {
+        return Err(refused!("no worktree of forest '{forest}' is on a branch"));
+    }
+    let shown: Vec<&str> = branches.iter().map(|b| b.unwrap_or("(detached)")).collect();
+    Err(refused!(
+        "the worktrees of forest '{forest}' are not on one branch: {}",
+        shown.join(", ")
+    ))
 }
 
 /// `origin/HEAD` if it exists, else the branch of the repo's `HEAD`. Never guesses.

@@ -77,7 +77,10 @@ A target is a forest, by its name or its branch, or a repo, which means its own 
 | `init <name> [--branch <b>]` | New repo with no remote |
 | `clone <url> [name]` | New repo from a remote, or from a local repo |
 | `migrate <path> [name]` | Move an existing clone, bare repo or older layout into the layout |
-| `new <branch> <repo>… [--as <name>] [--from <ref>]` | Check out a branch in repos, in its forest |
+| `new <branch> <repo>… [--as <name>] [--from <ref>] [--no-fetch] [--create-only]` | Check out a branch in repos, in its forest |
+| `new --unnamed <repo>…` | Start a forest without a name, on a generated `wip-<MMDD>-<xxxx>` branch |
+| `add <repo>… [--no-fetch]` | Add repos to the forest you are in, on its branch |
+| `name <branch>` | Rename the branch of the forest you are in (the folder keeps its name) |
 | `ls [target]` | List repos and forests with their status |
 | `path [target [repo]] [--pick]` | Print the absolute path, or choose it in a fuzzy picker |
 | `rm [target [repo]] [--force] [--delete-branch]` | Remove one worktree, or the forest you are in, and optionally their branches |
@@ -112,7 +115,8 @@ That gives `fcd <target> [repo]`, which goes where `forest path` points, and `fc
 
 - Forest folders are flat, so `feat/x` becomes `feat-x`. `ls` shows the real branch name when it differs.
 - `new` adds to the forest that has the branch already, else makes one. It fails if a worktree is there already, and is all or nothing: if one repo fails, the worktrees and branches it made are removed again.
-- `new` uses an existing local branch, else the remote branch (with tracking), else creates a new branch from `--from` or the default branch. It says which on stderr, and as `branch_created` and `from` with `--json`. `--from` is only for a new branch, and must exist in every repo.
+- `new` uses an existing local branch, else the remote branch (with tracking), else creates a new branch from `--from` or the default branch. It says which on stderr, and as `branch_created` and `from` with `--json`. `--from` is only for a new branch, and must exist in every repo. `--no-fetch` skips the `fetch origin` first, and `--create-only` refuses instead of joining a forest that exists already (for scripts).
+- A forest can start without a name: `forest new --unnamed api web` puts it on a fresh `wip-…` branch of the same name. Once the work is clear, `forest name <branch>` renames the branch of every worktree; the folder keeps its name (say, for the box running in it), and the output says how to rename it later. `forest add <repo>…` puts more repos into the forest you are in, on its branch.
 - Git allows a branch to be checked out in only one worktree. A repo's own checkout holds its default branch, so no forest can have it.
 - `rm` removes one worktree, or the forest it is run in. It never removes a repo's own checkout. It refuses if there are uncommitted changes. `--delete-branch` only deletes a branch if every commit is on a remote-tracking branch or on the default branch, and never the default branch itself.
 - `done` merges fast-forward only, in each repo's home, and checks everything before touching anything: worktrees clean and on branches, homes on the default branch and clean, and every merge a fast-forward or already in. Any refusal refuses the whole forest, so nothing is left half-merged. With `--delete-branch` the branch goes too — the merge just put its commits on the default branch, so nothing is lost; the default branch itself is never deleted.

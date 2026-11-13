@@ -1,13 +1,15 @@
 //! `new`: put worktrees on a branch into its forest, making the forest if needed.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
 use crate::Output;
 use crate::cmd::path::Identity;
-use crate::error::{Result, fail};
+use crate::error::{Result, fail, refused};
 use crate::git::git;
 use crate::layout::{Layout, slug, valid_name};
 use crate::project::{
@@ -56,15 +58,20 @@ impl Start {
 }
 
 /// Puts a worktree of each project on `branch` into the forest that already has
-/// that branch, else into a new forest named `alias` or after the branch.
+/// that branch, else into a new forest named `alias` or after the branch. With
+/// no branch (`--unnamed`), a generated wip branch is the forest's name too.
 pub fn new(
     layout: &Layout,
-    branch: &str,
+    branch: Option<&str>,
     projects: &[String],
     alias: Option<&str>,
     from: Option<&str>,
+    no_fetch: bool,
+    create_only: bool,
 ) -> Result<Output> {
-    check_branch_name(branch)?;
+    if let Some(b) = branch {
+        check_branch_name(b)?;
+    }
     let mut unique: Vec<&String> = Vec::new();
     for p in projects {
         check_project(layout, p)?;
@@ -74,7 +81,19 @@ pub fn new(
     }
 
     let all = all_worktrees(layout)?;
-    let holding = forests_on(&all, layout, branch);
+    let branch = match branch {
+        Some(b) => b.to_string(),
+        None => wip_name(layout, &all, &unique)?,
+    };
+    let holding = forests_on(&all, layout, &branch);
+    // --create-only never joins: a branch a forest has, or a dir that exists,
+    // is refused instead, so scripts never land in someone else's forest.
+    if create_only && !holding.is_empty() {
+        return Err(refused!(
+            "'{branch}' is in forest '{}' already; --create-only never joins one",
+            holding[0]
+        ));
+    }
     let (name, created) = match holding.as_slice() {
         [f] => {
             if let Some(a) = alias.filter(|a| a != f) {
@@ -85,7 +104,16 @@ pub fn new(
             (f.clone(), false)
         }
         [] => {
-            let name = alias.map_or_else(|| slug(branch), str::to_string);
+            let name = alias.map_or_else(|| slug(&branch), str::to_string);
+            if create_only {
+                let dir = layout.forest_dir(&name);
+                if dir.exists() {
+                    return Err(refused!(
+                        "{} already exists; --create-only never adds to it",
+                        dir.display()
+                    ));
+                }
+            }
             check_new_name(layout, &all, &name, None)?;
             (name, true)
         }
@@ -107,9 +135,9 @@ pub fn new(
     let mut made: Vec<(&str, PathBuf, Start)> = Vec::new();
     for p in &unique {
         let path = dir.join(p);
-        match create_worktree(layout, p, branch, &path, from) {
+        match create_worktree(layout, p, &branch, &path, from, no_fetch) {
             Ok(start) => {
-                start.report(p, branch);
+                start.report(p, &branch);
                 made.push((p, path, start));
             }
             Err(e) => {
@@ -125,7 +153,7 @@ pub fn new(
                         ],
                     );
                     if start.created() {
-                        let _ = git(&repo, ["branch", "-D", branch]);
+                        let _ = git(&repo, ["branch", "-D", branch.as_str()]);
                     }
                 }
                 if created {
@@ -141,7 +169,7 @@ pub fn new(
         .collect();
     Ok(Output::new(
         format!("{}\n", dir.display()),
-        Identity::forest(&name, &dir, Some(branch.to_string()))
+        Identity::forest(&name, &dir, Some(branch.clone()))
             .with(json!({"created": created, "worktrees": worktrees})),
     ))
 }
@@ -187,13 +215,15 @@ fn check_project(layout: &Layout, project: &str) -> Result<()> {
 }
 
 /// Makes `path` a new worktree of `project` on `branch`. `from` is only for a new
-/// branch, and must exist.
+/// branch, and must exist. `no_fetch` skips `fetch origin`, for when something
+/// else keeps the repo fresh (or nothing should wait on the network).
 fn create_worktree(
     layout: &Layout,
     project: &str,
     branch: &str,
     path: &Path,
     from: Option<&str>,
+    no_fetch: bool,
 ) -> Result<Start> {
     let repo = layout.repo_dir(project);
     // Pruned first, so a deleted worktree can be made again.
@@ -211,7 +241,7 @@ fn create_worktree(
         ));
     }
 
-    if origin_url(&repo).is_some() {
+    if !no_fetch && origin_url(&repo).is_some() {
         fetch(&repo)?;
     }
     let remote = format!("origin/{branch}");
@@ -272,4 +302,97 @@ fn default_base(repo: &Path, project: &str) -> Result<String> {
     Err(fail!(
         "the default branch '{default}' of {project} has no commits yet; make a first commit"
     ))
+}
+
+/// A name for a forest that starts without one: `wip-<MMDD>-<4 [a-z0-9]>`, its
+/// branch as much as its dir. A name that is taken already is retried a few
+/// times; with 36^4 names a day, one is always free.
+fn wip_name(layout: &Layout, all: &[(String, Worktree)], projects: &[&String]) -> Result<String> {
+    let (month, day) = month_day(now_days());
+    for _ in 0..8 {
+        let name = format!("wip-{month:02}{day:02}-{}", wip_suffix(4));
+        let taken = layout.forest_dir(&name).is_dir()
+            || !forests_on(all, layout, &name).is_empty()
+            || projects.iter().any(|p| {
+                let repo = layout.repo_dir(p);
+                ref_exists(&repo, &format!("refs/heads/{name}"))
+                    || ref_exists(&repo, &format!("refs/remotes/origin/{name}"))
+            });
+        if !taken {
+            return Ok(name);
+        }
+    }
+    Err(fail!("no free wip-… name in 8 tries; try again"))
+}
+
+/// Days since the epoch, UTC.
+fn now_days() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| (d.as_secs() / 86400) as i64)
+}
+
+/// Month and day in the civil calendar, UTC, from days since the epoch.
+fn month_day(days: i64) -> (i64, i64) {
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (m, d)
+}
+
+/// Random chars for a wip name; the clock and pid when /dev/urandom is
+/// unreadable, which a collision is retried anyway.
+fn wip_suffix(n: usize) -> String {
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut bytes = vec![0u8; n];
+    if File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .is_err()
+    {
+        let mut x = (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64))
+        .rotate_left(32)
+            ^ u64::from(std::process::id());
+        for b in &mut bytes {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *b = (x >> 33) as u8;
+        }
+    }
+    bytes
+        .iter()
+        .map(|b| CHARS[usize::from(*b) % CHARS.len()] as char)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn month_and_day_from_epoch_days() {
+        assert_eq!(month_day(0), (1, 1)); // 1970-01-01
+        assert_eq!(month_day(19723), (1, 1)); // 2024-01-01
+        assert_eq!(month_day(19783), (3, 1)); // 2024-03-01, after a leap February
+        assert_eq!(month_day(20770), (11, 13)); // 2026-11-13
+    }
+
+    #[test]
+    fn wip_suffix_is_four_plain_chars() {
+        let s = wip_suffix(4);
+        assert_eq!(s.len(), 4);
+        assert!(
+            s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "{s}"
+        );
+    }
 }
