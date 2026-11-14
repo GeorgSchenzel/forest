@@ -828,6 +828,34 @@ fn forest_never_runs_fsmonitor_or_hooks() {
 }
 
 #[test]
+fn new_create_only_refuses_an_existing_local_branch() {
+    let e = Env::new();
+    e.project("api");
+    e.project("web");
+    // A local branch nobody has checked out anywhere: --create-only must
+    // refuse it instead of silently adopting it as the forest's branch.
+    e.git(&e.root.join("repos/api"), &["branch", "feat/x"]);
+    let r = e.forest(&["new", "feat/x", "api", "--create-only", "--json"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert_eq!(r.json()["error"]["code"], "refused");
+    let msg = r.json()["error"]["message"].as_str().unwrap().to_string();
+    assert!(msg.contains("feat/x"), "{msg}");
+    assert!(msg.contains("api"), "{msg}");
+    assert!(!forest_dir(&e, "feat-x").exists());
+
+    // A branch of one of several requested repos is enough to refuse.
+    e.git(&e.root.join("repos/web"), &["branch", "feat/y"]);
+    let r = e.forest(&["new", "feat/y", "api", "web", "--create-only"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert!(r.stderr.contains("web"), "{}", r.stderr);
+
+    // Without --create-only the existing branch is adopted, as before.
+    let r = e.forest(&["new", "feat/x", "api", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.json()["worktrees"][0]["branch_created"], false);
+}
+
+#[test]
 fn path_steps_into_the_only_worktree() {
     let e = Env::new();
     e.project("api");
