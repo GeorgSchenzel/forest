@@ -94,6 +94,22 @@ pub fn new(
             holding[0]
         ));
     }
+    // ... and it never adopts: a local branch of one of the repos would be
+    // checked out as if it had just been created, silently. (`add` adopts
+    // on purpose: it puts a repo on the branch the forest already has.)
+    if create_only {
+        let owners: Vec<&str> = unique
+            .iter()
+            .filter(|p| ref_exists(&layout.repo_dir(p), &format!("refs/heads/{branch}")))
+            .map(|p| p.as_str())
+            .collect();
+        if !owners.is_empty() {
+            return Err(refused!(
+                "'{branch}' already exists in {} (--create-only never adopts an existing branch)",
+                owners.join(", ")
+            ));
+        }
+    }
     let (name, created) = match holding.as_slice() {
         [f] => {
             if let Some(a) = alias.filter(|a| a != f) {
