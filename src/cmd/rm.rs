@@ -12,7 +12,7 @@ use crate::cmd::path::{Located, locate};
 use crate::error::{Error, Result, fail};
 use crate::git::git;
 use crate::layout::{Layout, canonical};
-use crate::project::{default_branch, is_dirty, members, unsaved_commits};
+use crate::project::{default_branch, is_dirty_wt, members, unsaved_commits};
 
 pub struct Item {
     pub project: String,
@@ -187,7 +187,7 @@ pub fn check(
     let mut refusals = Vec::new();
     let repo = layout.repo_dir(&item.project);
     let shown = item.path.display();
-    if !force && !item.missing && is_dirty(&item.path)? {
+    if !force && !item.missing && is_dirty_wt(&repo, &item.path)? {
         refusals.push(format!(
             "{shown} has uncommitted changes or untracked files"
         ));

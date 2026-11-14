@@ -18,7 +18,7 @@ use crate::cmd::rm::{Item, forest_items, remove, require_worktree_target};
 use crate::error::{Error, Result, fail};
 use crate::git::git;
 use crate::layout::{Layout, canonical};
-use crate::project::{default_branch, is_ancestor, is_dirty};
+use crate::project::{default_branch, is_ancestor, is_dirty, is_dirty_wt};
 
 /// How a branch meets its default branch.
 enum How {
@@ -178,7 +178,7 @@ fn check(
         refusals.push(format!("{p} is detached"));
         return Ok(None);
     };
-    if !item.missing && is_dirty(&item.path)? {
+    if !item.missing && is_dirty_wt(&repo, &item.path)? {
         refusals.push(format!(
             "{} has uncommitted changes or untracked files",
             item.path.display()

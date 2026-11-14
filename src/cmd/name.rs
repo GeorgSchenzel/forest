@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use crate::Output;
 use crate::cmd::path::Identity;
 use crate::error::{Result, fail, refused};
-use crate::git::{git, git_out};
+use crate::git::{WorktreeGit, git_in_worktree, git_in_worktree_out};
 use crate::layout::{Context, Layout, slug};
 use crate::project::{
     all_worktrees, check_branch_name, forests_on, members, one_branch, ref_exists,
@@ -48,18 +48,30 @@ pub fn name(layout: &Layout, new: &str) -> Result<Output> {
         }
     }
 
+    // B3: every member's git dirs must match the layout before anything is
+    // touched — `branch -m` runs in box-writable worktrees, and a rewritten
+    // `.git` pointer must not choose the config (or code) it runs with.
+    let pinned: Vec<(String, WorktreeGit)> = members
+        .iter()
+        .map(|(project, w)| {
+            WorktreeGit::new(&layout.repo_dir(project), &w.path)
+                .map(|dirs| (project.clone(), dirs))
+        })
+        .collect::<Result<_>>()
+        .map_err(|e| refused!("{e}"))?;
+
     let mut warnings = Vec::new();
     let mut done = Vec::new();
     let mut errors = Vec::new();
-    for (project, w) in &members {
+    for (project, dirs) in &pinned {
         // git moves the upstream config to the renamed branch; the remote
         // branch itself keeps its old name, which is worth saying.
-        if git_out(&w.path, ["config", &format!("branch.{old}.remote")]).is_some() {
+        if git_in_worktree_out(dirs, ["config", &format!("branch.{old}.remote")]).is_some() {
             warnings.push(format!(
                 "{project}: '{new}' still tracks '{old}'s upstream; the remote branch keeps its old name"
             ));
         }
-        match git(&w.path, ["branch", "-m", &old, new]) {
+        match git_in_worktree(dirs, ["branch", "-m", &old, new]) {
             Ok(_) => done.push(project.as_str()),
             Err(e) => errors.push(format!("{project}: {e}")),
         }
