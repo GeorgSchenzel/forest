@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{Result, fail, refused};
-use crate::git::{git, git_loud, git_ok, git_out, relative_paths};
+use crate::git::{WorktreeGit, git, git_loud, git_ok, git_out, git_in_worktree, relative_paths};
 use crate::layout::{Layout, canonical};
 
 pub struct Worktree {
@@ -199,9 +199,18 @@ pub fn worktree_repair(repo: &Path, paths: &[PathBuf]) -> Result<()> {
     git(repo, args).map(|_| ())
 }
 
-/// Uncommitted changes or untracked, non-ignored files.
+/// Uncommitted changes or untracked, non-ignored files. For a repo's home
+/// checkout (host-only, no box writes it).
 pub fn is_dirty(worktree: &Path) -> Result<bool> {
     Ok(!git(worktree, ["status", "--porcelain"])?.is_empty())
+}
+
+/// [`is_dirty`] for a linked worktree, whose `.git` a box can rewrite: the
+/// git dirs come from the layout (B3), and git never runs there when they
+/// don't check out.
+pub fn is_dirty_wt(repo: &Path, worktree: &Path) -> Result<bool> {
+    let dirs = WorktreeGit::new(repo, worktree)?;
+    Ok(!git_in_worktree(&dirs, ["status", "--porcelain"])?.is_empty())
 }
 
 /// The refs a commit can be on so that deleting a branch loses nothing: every

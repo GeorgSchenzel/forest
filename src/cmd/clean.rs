@@ -13,7 +13,7 @@ use crate::cmd::rm::{Item, forest_items, remove};
 use crate::error::Result;
 use crate::git::git;
 use crate::layout::Layout;
-use crate::project::{default_branch, is_dirty, is_done, unsaved_commits};
+use crate::project::{default_branch, is_dirty_wt, is_done, unsaved_commits};
 
 pub fn clean(layout: &Layout, dry_run: bool, delete_branch: bool) -> Result<Output> {
     let verb = if dry_run { "would remove" } else { "removed" };
@@ -77,10 +77,10 @@ fn not_done(layout: &Layout, items: &[Item], strays: bool) -> Result<Vec<String>
     }
     for item in items {
         let p = &item.project;
-        if !item.missing && is_dirty(&item.path)? {
+        let repo = layout.repo_dir(p);
+        if !item.missing && is_dirty_wt(&repo, &item.path)? {
             reasons.push(format!("{p} has uncommitted changes"));
         }
-        let repo = layout.repo_dir(p);
         match &item.branch {
             None => reasons.push(format!("{p} is detached")),
             Some(b) if !is_done(&repo, b, &default_branch(&repo)?) => {

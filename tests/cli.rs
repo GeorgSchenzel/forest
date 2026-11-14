@@ -765,8 +765,7 @@ fn new_create_only_refuses_to_join_or_fill_in() {
 /// forest git invocation may run them (a box can write the repo's git dir,
 /// and host-side git would then run box-planted code).
 #[test]
-fn forest_never_runs_fsmonitor_or_hooks() {
-    let e = Env::new();
+fn forest_never_runs_fsmonitor_or_hooks() {    let e = Env::new();
     let api = e.project("api");
     e.project("web");
     let fsmon = e.base.join("fsmon-ran");
@@ -825,6 +824,133 @@ fn forest_never_runs_fsmonitor_or_hooks() {
     e.ok(&["ls"]);
     assert!(!fsmon.exists(), "forest ran the repo's core.fsmonitor");
     assert!(!hooked.exists(), "forest ran the repo's post-checkout hook");
+}
+
+/// A recursive copy, for building the attacker's git dir from the real one.
+fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// The linked-worktree row of an `ls --json` run (the one non-`home` row).
+fn worktree_row(r: &Run) -> Value {
+    r.json()["worktrees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["home"] == Value::Bool(false))
+        .cloned()
+        .expect("the forest worktree row")
+}
+
+/// B3, end to end: the worktree's `.git` file (box-writable) is rewritten,
+/// or the worktree entry's `commondir` redirects, to a config whose
+/// `filter.x.clean` touches a canary. Plain `git status` runs the canary;
+/// `forest ls` must refuse the worktree as an error row instead, and
+/// `forest name` must refuse before renaming anything.
+#[test]
+fn ls_and_name_refuse_worktrees_with_rewritten_git_pointers() {
+    let e = Env::new();
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // A repo, a forest worktree, a tracked same-size-modified file, and the
+    // filter attribute for it (the filter itself lives only in the
+    // attacker's config).
+    let repo = e.project("api");
+    fs::write(repo.join("f.txt"), "aaaaaaaaa\n").unwrap();
+    e.git(&repo, &["add", "."]);
+    e.commit(&repo, "file");
+    let f = PathBuf::from(e.ok(&["new", "feat/x", "api"]));
+    let wt = f.join("api");
+    fs::write(wt.join(".gitattributes"), "f.txt filter=x\n").unwrap();
+    e.git(&wt, &["add", ".gitattributes"]);
+    e.commit(&wt, "attrs");
+    fs::write(wt.join("f.txt"), "bbbbbbbbb\n").unwrap();
+
+    // The attacker's common dir: the repo's git dir plus the filter, whose
+    // clean step touches a canary outside everything.
+    let canary = e.base.join("filter-ran");
+    let filter = e.base.join("filter.sh");
+    fs::write(&filter, format!("#!/bin/sh\ntouch {}\n", canary.display())).unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755)).unwrap();
+    let attacker = e.base.join("attacker");
+    copy_dir(&repo.join(".git"), &attacker);
+    let _ = fs::remove_dir_all(attacker.join("worktrees"));
+    let mut cfg = fs::read_to_string(attacker.join("config")).unwrap();
+    cfg.push_str(&format!(
+        "[filter \"x\"]\n\tclean = {}\n\tsmudge = cat\n",
+        filter.display()
+    ));
+    fs::write(attacker.join("config"), cfg).unwrap();
+
+    // The fake entry a rewritten `.git` points at.
+    let entry = repo.join(".git/worktrees/api");
+    let fake = e.base.join("fake-entry");
+    fs::create_dir_all(&fake).unwrap();
+    fs::write(fake.join("commondir"), format!("{}\n", attacker.display())).unwrap();
+    fs::copy(entry.join("HEAD"), fake.join("HEAD")).unwrap();
+    fs::copy(entry.join("index"), fake.join("index")).unwrap();
+
+    // Shape 1: the box rewrote the worktree's `.git`. Control: plain git
+    // status runs the box-chosen filter.
+    let gitfile = wt.join(".git");
+    let real = fs::read_to_string(&gitfile).unwrap();
+    fs::write(&gitfile, format!("gitdir: {}\n", fake.display())).unwrap();
+    e.git(&wt, &["status", "--porcelain"]);
+    assert!(canary.exists(), "plain git must run the box-chosen filter");
+    let _ = fs::remove_file(&canary);
+
+    // `ls` still works and reports the worktree as an error row; git never
+    // ran in it, so the canary stays gone.
+    let r = e.forest(&["ls", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let row = worktree_row(&r);
+    let err = row["error"].as_str().unwrap().to_string();
+    assert!(err.contains("points at"), "the row must say why: {err}");
+    assert!(!canary.exists(), "forest ls ran the box-chosen filter");
+
+    // `name` refuses before renaming anything.
+    let r = e.forest_in(&f, &["name", "feat/z"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert!(r.stderr.contains("points at"), "{}", r.stderr);
+    assert!(!has_branch(&e, &repo, "feat/z"));
+
+    // Shape 2: the entry's commondir redirects (same effect from the other
+    // side). Control first.
+    fs::write(&gitfile, &real).unwrap();
+    fs::write(entry.join("commondir"), format!("{}\n", attacker.display())).unwrap();
+    e.git(&wt, &["status", "--porcelain"]);
+    assert!(canary.exists());
+    let _ = fs::remove_file(&canary);
+    let r = e.forest(&["ls", "--json"]);
+    let row = worktree_row(&r);
+    let err = row["error"].as_str().unwrap().to_string();
+    assert!(err.contains("commondir"), "the row must say why: {err}");
+    assert!(!canary.exists());
+    let r = e.forest_in(&f, &["name", "feat/z"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert!(!has_branch(&e, &repo, "feat/z"));
+
+    // Restored, both work again: ls reports the modification, name renames.
+    fs::write(entry.join("commondir"), "../..\n").unwrap();
+    let r = e.forest(&["ls", "--json"]);
+    let row = worktree_row(&r);
+    assert!(row["error"].is_null(), "{}", row["error"]);
+    assert_eq!(row["dirty"], Value::Bool(true));
+    let r = e.forest_in(&f, &["name", "feat/z"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(e.git(&wt, &["branch", "--show-current"]), "feat/z");
+    assert!(!canary.exists());
 }
 
 #[test]

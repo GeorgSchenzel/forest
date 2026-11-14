@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::Output;
 use crate::cmd::path::{Located, locate};
 use crate::error::Result;
-use crate::git::git;
+use crate::git::{WorktreeGit, git, git_in_worktree};
 use crate::layout::{Layout, slug};
 use crate::project::{all_worktrees, default_branch, origin_url};
 
@@ -119,7 +119,7 @@ pub fn ls(layout: &Layout, name: Option<&str>) -> Result<Output> {
         None => projects.contains(&r.project),
     });
     for row in rows.iter_mut().filter(|r| !r.missing) {
-        fill_status(row);
+        fill_status(layout, row);
     }
     rows.sort_by(|a, b| (&a.forest, &a.project, &a.path).cmp(&(&b.forest, &b.project, &b.path)));
 
@@ -232,8 +232,17 @@ pub fn ls(layout: &Layout, name: Option<&str>) -> Result<Output> {
 
 /// One `git status` per worktree gives head, upstream, ahead/behind and dirtiness.
 /// A failure is recorded on the row, so one broken worktree doesn't hide the rest.
-fn fill_status(row: &mut Row) {
-    let out = match git(&row.path, ["status", "--porcelain=v2", "--branch"]) {
+/// Linked worktrees run with their git dirs pinned to the layout (B3): a
+/// box-writable `.git` pointer must not choose the config git runs with —
+/// a refusal shows up as the row's error, and git never runs there.
+fn fill_status(layout: &Layout, row: &mut Row) {
+    let out = if row.home {
+        git(&row.path, ["status", "--porcelain=v2", "--branch"])
+    } else {
+        WorktreeGit::new(&layout.repo_dir(&row.project), &row.path)
+            .and_then(|dirs| git_in_worktree(&dirs, ["status", "--porcelain=v2", "--branch"]))
+    };
+    let out = match out {
         Ok(out) => out,
         Err(e) => {
             row.error = Some(e.to_string());
