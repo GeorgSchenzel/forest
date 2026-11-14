@@ -761,6 +761,72 @@ fn new_create_only_refuses_to_join_or_fill_in() {
     assert_eq!(PathBuf::from(out), fx);
 }
 
+/// A repo whose `core.fsmonitor` and post-checkout hook touch canaries: no
+/// forest git invocation may run them (a box can write the repo's git dir,
+/// and host-side git would then run box-planted code).
+#[test]
+fn forest_never_runs_fsmonitor_or_hooks() {
+    let e = Env::new();
+    let api = e.project("api");
+    e.project("web");
+    let fsmon = e.base.join("fsmon-ran");
+    let hooked = e.base.join("hook-ran");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        for (name, mark) in [("fsmon.sh", "fsmon-ran"), ("hook.sh", "hook-ran")] {
+            let script = e.base.join(name);
+            // The mark is absolute: git runs hooks from the worktree top
+            // with a relative `$0`.
+            fs::write(
+                &script,
+                format!("#!/bin/sh\ntouch {}\n", e.base.join(mark).display()),
+            )
+            .unwrap();
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    e.git(
+        &api,
+        &[
+            "config",
+            "core.fsmonitor",
+            e.base.join("fsmon.sh").to_str().unwrap(),
+        ],
+    );
+    fs::copy(e.base.join("hook.sh"), api.join(".git/hooks/post-checkout")).unwrap();
+
+    // The canaries work: plain git (no hardening) runs both.
+    e.git(&api, &["status", "--porcelain"]);
+    e.git(
+        &api,
+        &[
+            "worktree",
+            "add",
+            "--no-track",
+            "-b",
+            "plain",
+            e.base.join("wt-plain").to_str().unwrap(),
+        ],
+    );
+    assert!(
+        fsmon.exists() && hooked.exists(),
+        "the canaries must fire for plain git"
+    );
+
+    // forest's own git never does: ls (a `git status` per worktree), new
+    // (a `git worktree add`) and add (another one) all stay quiet.
+    fs::remove_file(&fsmon).unwrap();
+    fs::remove_file(&hooked).unwrap();
+    e.ok(&["ls", "--json"]);
+    e.ok(&["new", "feat/x", "api"]);
+    e.ok(&["ls", "--json"]);
+    e.forest_in(&forest_dir(&e, "feat-x"), &["add", "web"]);
+    e.ok(&["ls"]);
+    assert!(!fsmon.exists(), "forest ran the repo's core.fsmonitor");
+    assert!(!hooked.exists(), "forest ran the repo's post-checkout hook");
+}
+
 #[test]
 fn path_steps_into_the_only_worktree() {
     let e = Env::new();
